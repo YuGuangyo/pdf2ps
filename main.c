@@ -82,8 +82,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (argc >= 6) file = argv[5];
+    /*
+     * CUPS filter argv layout:
+     *   argv[0] filter  argv[1] job-id  argv[2] user  argv[3] title
+     *   argv[4] copies  argv[5] options argv[6] input-file
+     * argc == 7 when CUPS passes a file (the usual case for the first
+     * filter in the chain); argc == 6 means "read stdin".
+     */
+    if (argc >= 7) file = argv[6];
     else if (argc == 2 && argv[1][0] != '-') file = argv[1];
+
+    if (file && file[0] == '-') file = NULL;   /* CUPS uses "-" for stdin */
 
     if (file) {
         in = fopen(file, "rb");
