@@ -1,0 +1,43 @@
+name: build-mipsel
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch musl soft-float mipsel cross toolchain
+        run: |
+          set -e
+          curl -fsSL -o tc.tgz https://musl.cc/mipsel-linux-muslsf-cross.tgz
+          tar xzf tc.tgz
+          ls -d mipsel-linux-muslsf-cross
+
+      - name: Compile pdftops-lite
+        run: |
+          set -e
+          TC=$PWD/mipsel-linux-muslsf-cross/bin
+          CC=${TC}/mipsel-linux-muslsf-gcc
+          $CC --version
+          $CC -O2 -Wall -Wextra -static -o pdftops-lite \
+              buf.c pdfobj.c psgen.c pdfimage.c main.c
+          file pdftops-lite || true
+          ls -l pdftops-lite
+
+      - name: Sanity check generated PostScript on a tiny PDF
+        run: |
+          set -e
+          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > tiny.pdf
+          qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps || \
+            (sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static && \
+             qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps)
+          head -40 tiny.ps
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdftops-lite-mipsel
+          path: pdftops-lite
