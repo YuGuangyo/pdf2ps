@@ -27,7 +27,6 @@ int psgen_emit_image(pdf_doc *doc, pdf_value *xobj, psgen_t *g) {
     const char *fn;
     int w, h, bpcv = 8;
     int ncomp = 1;
-    int i;
 
     if (!xobj || xobj->type != PDF_STREAM) return 0;
     d = xobj->u.stream.dict;

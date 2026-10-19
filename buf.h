@@ -14,6 +14,7 @@ typedef struct {
 
 void buf_init(buf_t *b);
 void buf_free(buf_t *b);
+int  buf_reserve(buf_t *b, size_t need);
 int  buf_put(buf_t *b, const void *p, size_t n);
 int  buf_putc(buf_t *b, int c);
 int  buf_puts(buf_t *b, const char *s);

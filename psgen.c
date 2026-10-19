@@ -19,8 +19,11 @@ static void ps_printf(psgen_t *g, const char *fmt, ...) {
     va_end(ap);
 }
 
-/* PostScript string escaping */
-static void ps_write_literal(psgen_t *g, const unsigned char *s, size_t n) {
+/* PostScript string escaping.
+ * Kept for callers that need a fully escaped literal; currently unused,
+ * hence the attribute so -Wunused-function stays quiet. */
+static void __attribute__((unused))
+ps_write_literal(psgen_t *g, const unsigned char *s, size_t n) {
     size_t i;
     fputc('(', g->out);
     for (i = 0; i < n; i++) {

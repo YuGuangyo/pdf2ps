@@ -18,18 +18,27 @@ void buf_free(buf_t *b) {
     b->len = b->cap = 0;
 }
 
-int buf_put(buf_t *b, const void *p, size_t n) {
+/*
+ * Ensure at least `need` bytes are addressable past b->data.
+ * Returns 1 on success, 0 on allocation failure.
+ * NOTE: may realloc b->data, so callers must re-read b->data afterwards.
+ */
+int buf_reserve(buf_t *b, size_t need) {
     size_t ncap;
     unsigned char *nd;
+    if (need <= b->cap) return 1;
+    ncap = b->cap ? b->cap : 4096;
+    while (ncap < need) ncap *= 2;
+    nd = (unsigned char *)realloc(b->data, ncap);
+    if (!nd) return 0;
+    b->data = nd;
+    b->cap = ncap;
+    return 1;
+}
+
+int buf_put(buf_t *b, const void *p, size_t n) {
     if (n == 0) return 1;
-    if (b->len + n > b->cap) {
-        ncap = b->cap ? b->cap : 4096;
-        while (ncap < b->len + n) ncap *= 2;
-        nd = (unsigned char *)realloc(b->data, ncap);
-        if (!nd) return 0;
-        b->data = nd;
-        b->cap = ncap;
-    }
+    if (!buf_reserve(b, b->len + n)) return 0;
     memcpy(b->data + b->len, p, n);
     b->len += n;
     return 1;
@@ -116,7 +125,6 @@ static int inflate_block(buf_t *out, bitstream_t *bs, const huff_t *lit, const h
     for (;;) {
         int sym = huff_decode(bs, lit);
         int len, ex, dsym, d;
-        size_t from;
         if (sym < 0) return -1;
         if (sym < 256) {
             if (!buf_putc(out, sym)) return -1;

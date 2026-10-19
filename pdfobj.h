@@ -77,17 +77,25 @@ const char *pdf_name(pdf_value *v);
 double pdf_number(pdf_value *v);
 int pdf_intval(pdf_value *v);
 
-/* character classification (shared by lexers and content interpreter) */
-static int is_ws_pdf(int c) {
+/* character classification (shared by lexers and content interpreter).
+ * These live in the header, so translation units that do not use every
+ * helper would trip -Wunused-function; mark them unused deliberately. */
+#if defined(__GNUC__)
+#  define PDF_H_UNUSED __attribute__((unused))
+#else
+#  define PDF_H_UNUSED
+#endif
+
+static PDF_H_UNUSED int is_ws_pdf(int c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == 0;
 }
 
-static int is_delim_pdf(int c) {
+static PDF_H_UNUSED int is_delim_pdf(int c) {
     return c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' ||
            c == '{' || c == '}' || c == '/' || c == '%';
 }
 
-static int isdigit_pdf(int c) {
+static PDF_H_UNUSED int isdigit_pdf(int c) {
     return c >= '0' && c <= '9';
 }
 

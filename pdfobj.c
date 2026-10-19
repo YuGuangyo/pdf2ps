@@ -437,7 +437,6 @@ void pdf_note_xref_stream(pdf_doc *doc, pdf_value *st) {
     pdf_value *sizev;
     pdf_value *typev;
     int size, w0 = 1, w1 = 2, w2 = 1;
-    int i;
 
     if (!st || st->type != PDF_STREAM) return;
     typev = pdf_dict_get(st->u.stream.dict, "Type");
