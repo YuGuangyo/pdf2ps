@@ -10,18 +10,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache musl cross toolchain
+        uses: actions/cache@v4
+        with:
+          path: mipsel-linux-muslsf-cross
+          key: musl-mipsel-linux-muslsf-cross-v1
+
       - name: Fetch musl soft-float mipsel cross toolchain
         run: |
-          set -e
-          curl -fsSL -o tc.tgz https://musl.cc/mipsel-linux-muslsf-cross.tgz
+          set -euo pipefail
+          if [ -x mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc ]; then
+            echo "toolchain restored from cache"
+            mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc --version | head -1
+            exit 0
+          fi
+
+          URL=https://musl.cc/mipsel-linux-muslsf-cross.tgz
+          for i in 1 2 3 4 5; do
+            echo "== attempt $i =="
+            if curl -fSL --retry 5 --retry-all-errors \
+                    --retry-delay 5 --connect-timeout 30 \
+                    --speed-time 60 --speed-limit 1024 \
+                    -o tc.tgz "$URL"; then
+              break
+            fi
+            echo "download failed (exit $?), retrying in 15s..."
+            rm -f tc.tgz
+            sleep 15
+          done
+
+          ls -l tc.tgz
           tar xzf tc.tgz
-          ls -d mipsel-linux-muslsf-cross
+          rm -f tc.tgz
+          mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc --version | head -1
 
       - name: Compile pdftops-lite
         run: |
-          set -e
-          TC=$PWD/mipsel-linux-muslsf-cross/bin
-          CC=${TC}/mipsel-linux-muslsf-gcc
+          set -euo pipefail
+          CC=$PWD/mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc
           $CC --version
           $CC -O2 -Wall -Wextra -static -o pdftops-lite \
               buf.c pdfobj.c psgen.c pdfimage.c main.c
@@ -30,7 +56,7 @@ jobs:
 
       - name: Sanity check generated PostScript on a tiny PDF
         run: |
-          set -e
+          set -euo pipefail
           printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > tiny.pdf
           qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps || \
             (sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static && \
