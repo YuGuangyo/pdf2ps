@@ -65,7 +65,21 @@ jobs:
           ls -1 "$TC_DIR/bin/" | head -20
           "$TC_DIR/bin/$TC_GCC" --version | head -1
 
-      - name: Compile pdftops-lite
+      # 先用宿主机原生 gcc + AddressSanitizer 编译一版，跑真实手机 PDF。
+      # 这是在 mipsel 二进制上「段错误无声」时唯一能拿到精确位置的办法。
+      - name: Build native ASan binary for debugging
+        run: |
+          set -euo pipefail
+          gcc --version | head -1
+          # 不链接 -static，ASan 需要动态运行时
+          gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -fstack-protector-all \
+              -o pdftops-asan \
+              buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
+          ls -lh pdftops-asan
+          file pdftops-asan
+
+      - name: Compile pdftops-lite (mipsel static)
         run: |
           set -euo pipefail
           # 归档里的 bin/ 保持 755、属主 root，任务用户无法在其中建软链接
@@ -75,7 +89,8 @@ jobs:
           "$CC" --version | head -1
           # psgen.c 包含 <math.h>，静态链接时把 -lm 带上更保险
           # 三元组 mipsel-... 已隐含小端，无需 -EL
-          "$CC" -O2 -Wall -Wextra -static \
+          # -g 保留调试符号：崩溃时能对上 epc 地址
+          "$CC" -O2 -g -Wall -Wextra -static \
               -o pdftops-lite \
               buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
           file pdftops-lite || true
@@ -85,57 +100,178 @@ jobs:
           echo -n "e_flags bytes: "
           od -An -tx1 -j36 -N4 pdftops-lite
 
-      - name: Sanity check generated PostScript on a tiny PDF
+      # ------------------------------------------------------------------
+      # 生成测试 PDF 集合
+      #   tiny.pdf     : 最小合法 PDF（回归基线）
+      #   broken.pdf   : 无 trailer（测容错回退路径）
+      #   type3.pdf    : 模拟 Skia/Chromium 的 Type3 位图字体
+      #   cs.pdf       : 模拟 ContentStream 为数组 + 多页
+      #   测试样本放在 testdata/ 目录，若仓库里有真实手机 PDF 也会一起跑
+      # ------------------------------------------------------------------
+      - name: Generate test PDFs
+        run: |
+          set -euo pipefail
+          mkdir -p testdata out
+          python3 - <<'PY'
+          import os
+
+          def write_pdf(path, objs, root=1):
+              out = bytearray(b"%PDF-1.4\n")
+              offs = []
+              for i, body in enumerate(objs, start=1):
+                  offs.append(len(out))
+                  out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+              xref_at = len(out)
+              out += b"xref\n0 %d\n" % (len(objs) + 1)
+              out += b"0000000000 65535 f \n"
+              for off in offs:
+                  out += b"%010d 00000 n \n" % off
+              out += (b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+                      % (len(objs) + 1, root, xref_at))
+              open(path, "wb").write(bytes(out))
+              print("%-20s %6d bytes  %d objects" % (path, len(out), len(objs)))
+
+          # ---- 1. tiny.pdf : 最小合法 PDF ----
+          content = b"BT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\n"
+          write_pdf("testdata/tiny.pdf", [
+              b"<< /Type /Catalog /Pages 2 0 R >>",
+              b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+              b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+              b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+              b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream",
+              b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+          ])
+
+          # ---- 2. type3.pdf : 模拟 Skia Type3 位图字体 ----
+          # 这是手机 Chrome 打印 PDF 的真实形态：159 个 Type3 字体，
+          # /Differences 里大量重复的 /g0（空字形）指向同一个 CharProc。
+          glyph = (b"500 0 0 0 500 700 d1\n"
+                   b"0 0 500 700 re f\n")
+          write_pdf("testdata/type3.pdf", [
+              b"<< /Type /Catalog /Pages 2 0 R >>",
+              b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+              b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+              b"/Resources << /Font << /F10 5 0 R >> >> /Contents 4 0 R >>",
+              b"<< /Length %d >>\nstream\n" % len(
+                  b"BT /F10 24 Tf 72 700 Td (AAAA) Tj ET\n")
+              + b"BT /F10 24 Tf 72 700 Td (AAAA) Tj ET\nendstream",
+              b"<< /Type /Font /Subtype /Type3 /Name /F10 "
+              b"/FontBBox[ 69 84 921 -796] /FontMatrix[ .001 0 0 .001 0 0 ] "
+              b"/CharProcs << /g0 6 0 R >> "
+              b"/Encoding << /Type /Encoding "
+              b"/Differences[ 0 /g0 /g0 /g0 /g0 ] >> "
+              b"/FirstChar 0 /LastChar 3 "
+              b"/Widths[ 500 500 500 500 ] "
+              b"/Resources << >> >>",
+              b"<< /Length %d >>\nstream\n" % len(glyph) + glyph + b"endstream",
+          ])
+
+          # ---- 3. cs.pdf : /Contents 是数组 + 两页 ----
+          c1 = b"BT /F1 12 Tf 72 700 Td (page one) Tj ET\n"
+          c2 = b"BT /F1 12 Tf 72 700 Td (page two) Tj ET\n"
+          write_pdf("testdata/cs.pdf", [
+              b"<< /Type /Catalog /Pages 2 0 R >>",
+              b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+              b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+              b"/Contents [5 0 R 6 0 R] "
+              b"/Resources << /Font << /F1 9 0 R >> >> >>",
+              b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+              b"/Contents 7 0 R "
+              b"/Resources << /Font << /F1 9 0 R >> >> >>",
+              b"<< /Length %d >>\nstream\n" % len(c1) + c1 + b"endstream",
+              b"<< /Length %d >>\nstream\n" % len(b"\n") + b"\nendstream",
+              b"<< /Length %d >>\nstream\n" % len(c2) + c2 + b"endstream",
+              b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+          ])
+
+          # ---- 4. broken.pdf : 无 trailer ----
+          open("testdata/broken.pdf", "wb").write(
+              b"%PDF-1.4\n"
+              b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+              b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+              b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]"
+              b"/Contents 4 0 R>>endobj\n"
+              b"4 0 obj<</Length 44>>stream\n"
+              b"BT /F1 24 Tf 72 700 Td (NoTrailer) Tj ET\n"
+              b"endstream\nendobj\n")
+          print("testdata/broken.pdf      no trailer")
+
+          # ---- 5. 真实手机 PDF：若仓库里带了 sample.pdf 就用它 ----
+          for src in ("testdata/phone.pdf", "sample.pdf", "phone.pdf"):
+              if os.path.exists(src):
+                  print("real-world sample found:", src, os.path.getsize(src), "bytes")
+                  if src != "testdata/phone.pdf":
+                      os.rename(src, "testdata/phone.pdf")
+                  break
+          PY
+          ls -l testdata/
+
+      # ------------------------------------------------------------------
+      # 关键一步：ASan 二进制跑全部样本。崩溃时会打印精确的源码位置。
+      # ------------------------------------------------------------------
+      - name: Run ASan on all samples
+        run: |
+          set -uo pipefail
+          fail=0
+          for f in testdata/*.pdf; do
+            name=$(basename "$f")
+            echo "=================== $name ==================="
+            if PDFTOPS_DEBUG=1 ASAN_OPTIONS=abort_on_error=0:detect_leaks=0 \
+                 ./pdftops-asan "$f" > "out/$name.ps" 2> "out/$name.err"; then
+              echo "OK  exit=0  ps=$(wc -c < "out/$name.ps") bytes"
+              head -1 "out/$name.ps"
+            else
+              rc=$?
+              echo "FAIL exit=$rc"
+              cat "out/$name.err"
+              fail=1
+            fi
+          done
+          echo "=================== summary ==================="
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::ASan reported a failure - see the log above"
+            exit 1
+          fi
+          echo "all samples converted without ASan/UBSan errors"
+
+      # 逐样本做语义断言（不只是「没崩」，还要「内容对」）
+      - name: Assert output content
+        run: |
+          set -euo pipefail
+          grep -q 'Hello M401'    out/tiny.pdf.ps     && echo "OK tiny:    text survived"
+          head -1 out/tiny.pdf.ps | grep -q '%!PS'    && echo "OK tiny:    PS header"
+          grep -q 'page one'      out/cs.pdf.ps       && echo "OK cs:      page one"
+          grep -q 'page two'      out/cs.pdf.ps       && echo "OK cs:      page two"
+          grep -c '%%Page:'       out/cs.pdf.ps | grep -qx '2' && echo "OK cs:      2 pages"
+          grep -q 'AAAA'          out/type3.pdf.ps    && echo "OK type3:   text emitted"
+          if [ -f out/broken.pdf.ps ]; then
+            grep -q 'NoTrailer'   out/broken.pdf.ps   && echo "OK broken:  fallback path"
+          fi
+          echo "--- type3.pdf.ps (first 30 lines) ---"
+          head -30 out/type3.pdf.ps
+
+      # mipsel 静态二进制在 qemu 下再跑一遍，确认交叉编译产物行为一致
+      - name: Run mipsel binary under qemu
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user-static
+          for f in testdata/*.pdf; do
+            name=$(basename "$f")
+            echo "--- qemu $name ---"
+            PDFTOPS_DEBUG=1 qemu-mipsel-static ./pdftops-lite "$f" > "out/qemu-$name.ps" \
+              || { echo "::error::qemu run failed for $name"; exit 1; }
+            echo "qemu OK $(wc -c < "out/qemu-$name.ps") bytes"
+          done
+          grep -q 'Hello M401' out/qemu-tiny.pdf.ps && echo "OK qemu tiny"
 
-          # Build a *valid* PDF: the xref table needs real byte offsets, so
-          # emit objects first and record their positions as we go.
-          python3 - <<'PY'
-          objs = []
-          objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-          objs.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
-          objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
-                      b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>")
-          content = b"BT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\n"
-          objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream")
-          objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-
-          out = bytearray(b"%PDF-1.4\n")
-          offsets = []
-          for i, body in enumerate(objs, start=1):
-              offsets.append(len(out))
-              out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
-          xref_at = len(out)
-          out += b"xref\n0 %d\n" % (len(objs) + 1)
-          out += b"0000000000 65535 f \n"
-          for off in offsets:
-              out += b"%010d 00000 n \n" % off
-          out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
-              len(objs) + 1, xref_at)
-          open("tiny.pdf", "wb").write(bytes(out))
-          print("tiny.pdf:", len(out), "bytes, xref at", xref_at)
-          PY
-
-          PDFTOPS_DEBUG=1 qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps
-          echo "--- generated PostScript (first 25 lines) ---"
-          head -25 tiny.ps
-          head -1 tiny.ps | grep -q '%!PS' && echo "OK: valid PostScript header"
-          grep -q 'Hello M401' tiny.ps && echo "OK: text survived the round trip"
-
-          # Also exercise the no-trailer fallback path with a truncated file.
-          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (NoTrailer) Tj ET\nendstream\nendobj\n' > broken.pdf
-          if qemu-mipsel-static ./pdftops-lite broken.pdf > broken.ps; then
-            echo "OK: catalog located without a trailer"
-            grep -q 'NoTrailer' broken.ps && echo "OK: broken-file text emitted"
-          else
-            echo "NOTE: no-trailer file rejected (acceptable)"
-          fi
-
-      - uses: actions/upload-artifact@v4
+      # 把崩溃样本和诊断信息一起上传，方便在路由器上复现
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: pdftops-lite-mipsel
-          path: pdftops-lite
+          path: |
+            pdftops-lite
+            out/
           if-no-files-found: error
