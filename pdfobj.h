@@ -72,6 +72,20 @@ pdf_value *pdf_resolve(pdf_doc *doc, pdf_value *v);
 void val_free(pdf_value *v);
 void pdf_note_xref_stream(pdf_doc *doc, pdf_value *st);
 
+/*
+ * Decode a stream's payload into `out`, applying its /Filter chain.
+ *
+ * Supported filters: FlateDecode (with predictors), ASCII85Decode,
+ * ASCIIHexDecode, LZWDecode and RunLengthDecode. Image-only codecs
+ * (DCTDecode, JPXDecode, CCITTFaxDecode, JBIG2Decode) are not applied;
+ * callers that pass such streams through verbatim must not call this.
+ *
+ * Returns 1 on success, 0 on a decoding error (out is left usable and
+ * empty), so a corrupt font program cannot abort the whole job.
+ */
+int pdf_stream_decode(pdf_doc *doc, pdf_value *stream, buf_t *out);
+
+
 pdf_value *pdf_dict_get(pdf_value *dict, const char *key);
 const char *pdf_name(pdf_value *v);
 double pdf_number(pdf_value *v);

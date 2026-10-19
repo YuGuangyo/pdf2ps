@@ -701,3 +701,297 @@ pdf_value *pdf_resolve(pdf_doc *doc, pdf_value *v) {
     }
     return v;
 }
+
+
+/* =====================================================================
+ * Stream decoding
+ *
+ * Font programs, ICC-lite payloads and content streams all arrive
+ * compressed, and a font we cannot decompress is a font we cannot embed.
+ * The decoders below are deliberately total: every one of them bounds-checks
+ * its input and reports failure instead of trusting /Length, because a
+ * malformed font program must degrade to a fallback face, not kill the job.
+ * ===================================================================== */
+
+/* ---------- RunLengthDecode (PDF 7.4.5) ---------- */
+static int runlength_decode(const unsigned char *in, size_t inlen, buf_t *out) {
+    size_t i = 0;
+    while (i < inlen) {
+        unsigned len = in[i++];
+        if (len == 128) break;                  /* EOD */
+        if (len < 128) {
+            size_t n = (size_t)len + 1;
+            if (i + n > inlen) n = inlen - i;
+            if (!buf_put(out, in + i, n)) return 0;
+            i += n;
+        } else {
+            size_t n = 257u - (size_t)len;
+            int c;
+            if (i >= inlen) break;
+            c = in[i++];
+            while (n--) { if (!buf_putc(out, c)) return 0; }
+        }
+    }
+    return 1;
+}
+
+/* ---------- LZWDecode (PDF 7.4.4, variable 9..12 bit codes) ---------- */
+#define LZW_MAX_CODES  4096
+#define LZW_MAX_BYTES  (1u << 20)
+
+static int lzw_decode(const unsigned char *in, size_t inlen, int early,
+                      buf_t *out) {
+    /* dictionary: each entry is (prefix, first_byte, length) so rebuilding a
+     * string walks the prefix chain without keeping 4096 variable buffers. */
+    static short   prefix[LZW_MAX_CODES];
+    static unsigned char suffix[LZW_MAX_CODES];
+    static unsigned short entlen[LZW_MAX_CODES];
+    unsigned char *stack;
+    int code_bits = 9;
+    int next = 258;
+    int prev = -1;
+    unsigned bitbuf = 0;
+    int bitcnt = 0;
+    size_t i = 0;
+    int k;
+
+    for (k = 0; k < 256; k++) { prefix[k] = -1; suffix[k] = (unsigned char)k; entlen[k] = 1; }
+    prefix[256] = prefix[257] = -1; entlen[256] = entlen[257] = 0;
+
+    stack = (unsigned char *)malloc(LZW_MAX_BYTES);
+    if (!stack) return 0;
+
+    while (1) {
+        int code;
+        while (bitcnt < code_bits && i < inlen) {
+            bitbuf = (bitbuf << 8) | in[i++];
+            bitcnt += 8;
+        }
+        if (bitcnt < code_bits) break;
+        code = (int)((bitbuf >> (bitcnt - code_bits)) & ((1u << code_bits) - 1u));
+        bitcnt -= code_bits;
+
+        if (code == 256) {                       /* clear table */
+            code_bits = 9;
+            next = 258;
+            prev = -1;
+            continue;
+        }
+        if (code == 257) break;                  /* EOD */
+        if (code > next) break;                  /* corrupt */
+
+        {
+            int emit_code = code;
+            size_t sp = 0;
+
+            if (code == next) {
+                /* KwKwK case: prev string + its own first byte */
+                if (prev < 0) break;
+                {
+                    int c = prev;
+                    while (c >= 0 && sp < LZW_MAX_BYTES) { stack[sp++] = suffix[c]; c = prefix[c]; }
+                }
+                /* reverse in place, then append first byte again */
+                {
+                    size_t a = 0, b = sp ? sp - 1 : 0;
+                    while (a < b) { unsigned char t = stack[a]; stack[a] = stack[b]; stack[b] = t; a++; b--; }
+                }
+                if (sp >= LZW_MAX_BYTES) break;
+                stack[sp] = stack[0];
+                sp++;
+            } else {
+                int c = emit_code;
+                while (c >= 0 && sp < LZW_MAX_BYTES) { stack[sp++] = suffix[c]; c = prefix[c]; }
+                {
+                    size_t a = 0, b = sp ? sp - 1 : 0;
+                    while (a < b) { unsigned char t = stack[a]; stack[a] = stack[b]; stack[b] = t; a++; b--; }
+                }
+            }
+            if (!buf_put(out, stack, sp)) { free(stack); return 0; }
+
+            /* add prev+first_byte(stack) to the table */
+            if (prev >= 0 && next < LZW_MAX_CODES) {
+                prefix[next] = (short)prev;
+                suffix[next] = stack[0];
+                entlen[next] = (unsigned short)(entlen[prev] + 1);
+                next++;
+                if (next + early >= (1 << code_bits) && code_bits < 12) code_bits++;
+            }
+        }
+        prev = code;
+    }
+    free(stack);
+    return 1;
+}
+
+/* ---------- PNG / TIFF predictors (PDF 7.4.4.4) ---------- */
+static int apply_predictor(const unsigned char *in, size_t inlen, buf_t *out,
+                           int predictor, int colors, int bpc, int columns) {
+    size_t bpp, rowbytes;
+    size_t y;
+
+    if (predictor <= 1) return buf_put(out, in, inlen);
+    if (colors < 1) colors = 1;
+    if (bpc < 1) bpc = 8;
+    if (columns < 1) columns = 1;
+
+    bpp = ((size_t)colors * (size_t)bpc + 7u) / 8u;
+    if (bpp < 1) bpp = 1;
+    rowbytes = ((size_t)colors * (size_t)bpc * (size_t)columns + 7u) / 8u;
+    if (rowbytes == 0) return buf_put(out, in, inlen);
+
+    if (predictor == 2) {
+        /* TIFF predictor 2: per-component horizontal differencing. Only the
+         * 8-bit case is common in PDF fonts and images. */
+        if (bpc != 8) return buf_put(out, in, inlen);
+        if (!buf_put(out, in, inlen)) return 0;
+        for (y = 0; y + rowbytes <= out->len; y += rowbytes) {
+            size_t x;
+            for (x = (size_t)colors; x < rowbytes; x++) {
+                out->data[y + x] = (unsigned char)(out->data[y + x] + out->data[y + x - (size_t)colors]);
+            }
+        }
+        return 1;
+    }
+
+    /* PNG predictors: every row is prefixed with a filter-type byte. */
+    {
+        unsigned char *prev = NULL;
+        size_t pos = 0;
+        unsigned char *cur = (unsigned char *)malloc(rowbytes);
+        if (!cur) return 0;
+        while (pos < inlen) {
+            int ft = in[pos++];
+            size_t n = rowbytes;
+            size_t x;
+            if (pos + n > inlen) n = inlen - pos;
+            if (n == 0) break;
+            memcpy(cur, in + pos, n);
+            pos += n;
+            for (x = 0; x < n; x++) {
+                int a = (x >= bpp) ? cur[x - bpp] : 0;
+                int b = prev ? prev[x] : 0;
+                int c = (prev && x >= bpp) ? prev[x - bpp] : 0;
+                switch (ft) {
+                    case 1: cur[x] = (unsigned char)(cur[x] + a); break;
+                    case 2: cur[x] = (unsigned char)(cur[x] + b); break;
+                    case 3: cur[x] = (unsigned char)(cur[x] + ((a + b) >> 1)); break;
+                    case 4: {
+                        int p = a + b - c;
+                        int pa = p > a ? p - a : a - p;
+                        int pb = p > b ? p - b : b - p;
+                        int pc = p > c ? p - c : c - p;
+                        cur[x] = (unsigned char)(cur[x] +
+                                 ((pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c)));
+                        break;
+                    }
+                    default: break;              /* filter 0 = None */
+                }
+            }
+            if (!buf_put(out, cur, n)) { free(cur); return 0; }
+            if (!prev) prev = (unsigned char *)malloc(rowbytes);
+            else if (rowbytes) { /* reuse */ }
+            if (prev) {
+                size_t c2;
+                for (c2 = 0; c2 < n; c2++) prev[c2] = cur[c2];
+                for (; c2 < rowbytes; c2++) prev[c2] = 0;
+            }
+            (void)y;
+        }
+        free(cur);
+        free(prev);
+        return 1;
+    }
+}
+
+static int int_dict(pdf_value *dict, const char *key, int dflt) {
+    pdf_value *v = pdf_dict_get(dict, key);
+    if (!v) return dflt;
+    if (v->type == PDF_INT) return (int)v->u.i;
+    if (v->type == PDF_REAL) return (int)v->u.r;
+    return dflt;
+}
+
+int pdf_stream_decode(pdf_doc *doc, pdf_value *stream, buf_t *out) {
+    pdf_value *filter, *parms, *dict;
+    unsigned char *data;
+    size_t len;
+    int nfilters = 1, fi;
+
+    if (!out) return 0;
+    if (!stream || stream->type != PDF_STREAM) return 0;
+    dict = stream->u.stream.dict;
+    data = stream->sdata;
+    len = stream->slen;
+    if (!data) { data = (unsigned char *)""; len = 0; }
+
+    filter = pdf_resolve(doc, pdf_dict_get(dict, "Filter"));
+    parms  = pdf_resolve(doc, pdf_dict_get(dict, "DecodeParms"));
+    if (!filter || filter->type == PDF_NULL) return buf_put(out, data, len);
+
+    if (filter->type == PDF_ARRAY) {
+        nfilters = filter->u.arr.count;
+        if (nfilters <= 0) return buf_put(out, data, len);
+    }
+
+    {
+        buf_t cur, next;
+        int ok = 1;
+
+        buf_init(&cur);
+        if (!buf_put(&cur, data, len)) { buf_free(&cur); return 0; }
+
+        for (fi = 0; fi < nfilters && ok; fi++) {
+            pdf_value *f = (filter->type == PDF_ARRAY)
+                         ? pdf_resolve(doc, filter->u.arr.items[fi])
+                         : filter;
+            pdf_value *p = parms;
+            const char *nm = pdf_name(f);
+
+            buf_init(&next);
+            if (!nm) { ok = 0; break; }
+
+            if (!strcmp(nm, "FlateDecode") || !strcmp(nm, "Fl")) {
+                ok = (zlib_inflate(cur.data, cur.len, &next) == 0);
+            } else if (!strcmp(nm, "ASCII85Decode") || !strcmp(nm, "A85")) {
+                ok = ascii85_decode(cur.data, cur.len, &next);
+            } else if (!strcmp(nm, "ASCIIHexDecode") || !strcmp(nm, "AHx")) {
+                ok = asciihex_decode(cur.data, cur.len, &next);
+            } else if (!strcmp(nm, "LZWDecode") || !strcmp(nm, "LZW")) {
+                ok = lzw_decode(cur.data, cur.len,
+                                int_dict(p, "EarlyChange", 1), &next);
+            } else if (!strcmp(nm, "RunLengthDecode") || !strcmp(nm, "RL")) {
+                ok = runlength_decode(cur.data, cur.len, &next);
+            } else if (!strcmp(nm, "Crypt")) {
+                ok = buf_put(&next, cur.data, cur.len);   /* no-op */
+            } else {
+                ok = 0;                            /* image codec: refuse */
+            }
+
+            if (ok && p && p->type == PDF_DICT) {
+                int pred = int_dict(p, "Predictor", 1);
+                if (pred > 1) {
+                    buf_t unp;
+                    buf_init(&unp);
+                    ok = apply_predictor(next.data, next.len, &unp, pred,
+                                         int_dict(p, "Colors", 1),
+                                         int_dict(p, "BitsPerComponent", 8),
+                                         int_dict(p, "Columns", 1));
+                    buf_free(&next);
+                    next = unp;
+                }
+            }
+
+            buf_free(&cur);
+            cur = next;
+            /* DecodeParms may itself be an array parallel to /Filter */
+            if (parms && parms->type == PDF_ARRAY && fi < parms->u.arr.count)
+                p = pdf_resolve(doc, parms->u.arr.items[fi]);
+            (void)p;
+        }
+
+        if (ok && !buf_put(out, cur.data, cur.len)) ok = 0;
+        buf_free(&cur);
+        return ok;
+    }
+}

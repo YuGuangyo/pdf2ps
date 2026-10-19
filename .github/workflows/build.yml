@@ -75,7 +75,7 @@ jobs:
           gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
               -fstack-protector-all \
               -o pdftops-asan \
-              buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
+              buf.c pdfobj.c psfont.c psgen.c pdfimage.c main.c -lm
           ls -lh pdftops-asan
           file pdftops-asan
 
@@ -92,7 +92,7 @@ jobs:
           # -g 保留调试符号：崩溃时能对上 epc 地址
           "$CC" -O2 -g -Wall -Wextra -static \
               -o pdftops-lite \
-              buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
+              buf.c pdfobj.c psfont.c psgen.c pdfimage.c main.c -lm
           file pdftops-lite || true
           ls -lh pdftops-lite
           # 打印 ELF 头 e_flags，应与路由器 /usr/sbin/cupsd 的 0x00200034 一致

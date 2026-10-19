@@ -1,57 +1,50 @@
 /*
- * psfont.h - font resolution for pdftops-lite
+ * psfont.h - font resolution and glyph emission for pdftops-lite
  *
- * PDF fonts fall into four cases for a PostScript target:
+ * A psfont_t is created per (page /Resources, resource name) pair.  What it can
+ * do depends on how the PDF embeds the font:
  *
- *   1. Type1 / MMType1 / TrueType, base font is one of the 14 standard faces
- *      -> emit the matching PostScript font directly, byte codes pass through.
+ *   PSF_SIMPLE_STD     a base-14 face, byte codes pass through unchanged
+ *   PSF_SIMPLE_MAPPED  a simple font whose codes are remapped onto a base-14
+ *                      face (subset fonts, /Differences, Symbol-ish fonts)
+ *   PSF_TYPE3          the glyphs are themselves content streams
+ *   PSF_TRUETYPE_CID   Identity CMap + embedded TrueType: real 'glyf'
+ *                      outlines are emitted as PostScript paths
  *
- *   2. Type1 / TrueType simple font with an /Encoding + /Widths and no usable
- *      standard mapping (subset, custom encoding)
- *      -> emit the face plus a /Encoding override derived from /Differences.
+ * The distinction that decides output quality: the first two hand the job to
+ * one of the printer's built-in faces, while the last two send the document's
+ * own outlines.  psfont_fallback_count tells you how often we settled for the
+ * first two, so a caller can warn instead of silently printing the wrong face.
  *
- *   3. Type0 (composite) with Identity-H + CIDFontType2 (embedded TrueType)
- *      -> 2-byte codes address glyph IDs; shape them with TrueType 'glyf'
- *         outlines pulled from /FontFile2.
- *
- *   4. Type3
- *      -> glyphs are arbitrary content streams, replayed as paths.
- *
- * The old code looked fonts up by /BaseFont and compared it with the resource
- * name ("F1"), which never matched a real PDF; resolution now goes through the
- * page /Resources /Font dictionary as the spec requires.
+ * The struct layout is private to psfont.c; callers only use the functions.
  */
 #ifndef PSFONT_H
 #define PSFONT_H
 
+#include <stddef.h>
 #include <stdio.h>
 #include "pdfobj.h"
 
-/* One resolved font, cached per page. */
-typedef struct psfont_s psfont_t;
+#define PSF_MAX_GLYPH 256
 
+typedef struct psfont psfont_t;
+
+/* Counters for reporting: real vector work done vs. faces substituted. */
+extern unsigned long psfont_glyph_draws;
+extern unsigned long psfont_fallback_count;
+
+/* Drop every cached font.  Must be called between pages: a psfont_t owns
+ * buffers that are only valid while its page's resources are alive. */
 void psfont_cache_reset(void);
 void psfont_cache_free(void);
 
-/*
- * Look up /Resources /Font /<resname> and return a prepared font, or NULL if
- * the resource does not exist. The returned object stays valid until the next
- * psfont_cache_reset(); it is owned by the cache.
- */
+/* Resolve /Resources /Font /<resname>.  NULL when the resource is missing. */
 psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname);
 
-/* Emit the PostScript setup for this font at the given size. */
+/* Select the font on the printer side at `size`; no-op for path-emitted kinds. */
 void psfont_set(psfont_t *f, FILE *out, double size);
 
-/* Emit the glyphs for a PDF string operand. */
-void psfont_show(psfont_t *f, FILE *out, const unsigned char *s, size_t n,
-                 double *tm);
-
-/* Number of glyph draws emitted so far, for tests that assert real glyphs
- * rather than advance-only text. */
-extern unsigned long psfont_glyph_draws;
-
-/* Give-up counter, for tests: fonts that needed a fallback face. */
-extern unsigned long psfont_fallback_count;
+/* Emit glyphs for `s`; advances `tm` (PDF order: a b c d e f) in place. */
+void psfont_show(psfont_t *f, FILE *out, const unsigned char *s, size_t n, double *tm);
 
 #endif
