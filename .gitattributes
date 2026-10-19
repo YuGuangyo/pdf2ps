@@ -1,0 +1,10 @@
+# GitHub Actions 的 run 块在 Linux shell 里执行；
+# CRLF 会让脚本报 "$'\r': command not found"。
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.md    text eol=lf
+*.convs text eol=lf
+*.types text eol=lf

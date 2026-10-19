@@ -4,66 +4,96 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  # 用 cross-tools/musl-cross 的 GitHub Releases 制品，而不是 musl.cc：
+  #   1) 托管在 GitHub 上，Actions runner 下载又快又稳，不受 musl.cc 网络问题影响
+  #   2) 只有 61MB，比 musl.cc 的 101MB 小
+  #   3) 自带 .sha256 校验文件
+  TC_URL: https://github.com/cross-tools/musl-cross/releases/download/20250928/mipsel-unknown-linux-muslsf.tar.xz
+  TC_SHA_URL: https://github.com/cross-tools/musl-cross/releases/download/20250928/mipsel-unknown-linux-muslsf.tar.xz.sha256
+  TC_DIR: mipsel-unknown-linux-muslsf
+  TC_GCC: mipsel-unknown-linux-muslsf-gcc-15.2.0
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache musl cross toolchain
+      # 缓存 .tar.xz 压缩包本身（61MB），而不是解压后上万文件的目录。
+      # 缓存目录会让 post-job 的打包+上传阶段跑十几分钟并最终超时。
+      - name: Cache toolchain archive
         uses: actions/cache@v4
         with:
-          path: mipsel-linux-muslsf-cross
-          key: musl-mipsel-linux-muslsf-cross-v1
+          path: tc.tar.xz
+          key: musl-cross-mipsel-muslsf-20250928
 
-      - name: Fetch musl soft-float mipsel cross toolchain
+      - name: Fetch toolchain
         run: |
           set -euo pipefail
-          if [ -x mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc ]; then
-            echo "toolchain restored from cache"
-            mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc --version | head -1
-            exit 0
+          if [ -s tc.tar.xz ] && xz -t tc.tar.xz 2>/dev/null; then
+            echo "archive restored from cache (xz integrity OK)"
+          else
+            rm -f tc.tar.xz
+            curl -fSL --retry 5 --retry-connrefused --retry-delay 3 \
+                 --connect-timeout 20 -o tc.tar.xz "$TC_URL"
+            curl -fSL --retry 5 --retry-connrefused --retry-delay 3 \
+                 --connect-timeout 20 -o tc.sha256 "$TC_SHA_URL"
+            # 发行版里的 .sha256 只有裸哈希值，没有文件名；
+            # sha256sum -c 需要 "哈希  文件名" 格式，补上文件名再做校验。
+            EXPECT=$(tr -d '[:space:]' < tc.sha256)
+            echo "$EXPECT  tc.tar.xz" > tc.check
+            echo "expected: $EXPECT"
+            echo "actual:   $(sha256sum tc.tar.xz | cut -d' ' -f1)"
+            sha256sum -c tc.check || {
+              echo "checksum mismatch, re-downloading once"
+              rm -f tc.tar.xz
+              curl -fSL --retry 5 --retry-connrefused -o tc.tar.xz "$TC_URL"
+              sha256sum -c tc.check
+            }
           fi
-
-          URL=https://musl.cc/mipsel-linux-muslsf-cross.tgz
-          for i in 1 2 3 4 5; do
-            echo "== attempt $i =="
-            if curl -fSL --retry 5 --retry-all-errors \
-                    --retry-delay 5 --connect-timeout 30 \
-                    --speed-time 60 --speed-limit 1024 \
-                    -o tc.tgz "$URL"; then
-              break
-            fi
-            echo "download failed (exit $?), retrying in 15s..."
-            rm -f tc.tgz
-            sleep 15
-          done
-
-          ls -l tc.tgz
-          tar xzf tc.tgz
-          rm -f tc.tgz
-          mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc --version | head -1
+          ls -l tc.tar.xz
+          xz -t tc.tar.xz
+          tar xJf tc.tar.xz
+          # 归档内的 bin 里只有带版本号后缀的真实文件，没有裸 gcc 软链接
+          ls -1 "$TC_DIR/bin/" | head -20
+          "$TC_DIR/bin/$TC_GCC" --version | head -1
 
       - name: Compile pdftops-lite
         run: |
           set -euo pipefail
-          CC=$PWD/mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc
-          $CC --version
-          $CC -O2 -Wall -Wextra -static -o pdftops-lite \
-              buf.c pdfobj.c psgen.c pdfimage.c main.c
+          # 建一个裸名软链接，方便直接调用。
+          # 注意用绝对路径做链接目标：相对路径会被 ln 解释为相对于链接所在目录。
+          ln -sf "$PWD/$TC_DIR/bin/$TC_GCC" "$TC_DIR/bin/mipsel-gcc"
+          CC=$PWD/"$TC_DIR/bin/mipsel-gcc"
+          ls -l "$TC_DIR/bin/mipsel-gcc"
+          "$CC" --version | head -1
+          # psgen.c 包含 <math.h>，静态链接时把 -lm 带上更保险
+          # 三元组 mipsel-... 已隐含小端，无需 -EL
+          "$CC" -O2 -Wall -Wextra -static \
+              -o pdftops-lite \
+              buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
           file pdftops-lite || true
-          ls -l pdftops-lite
+          ls -lh pdftops-lite
+          # 打印 ELF 头 e_flags，应与路由器 /usr/sbin/cupsd 的 0x00200034 一致
+          # （O32 ABI + FP32 软浮点 + MIPS32R2）
+          echo -n "e_flags bytes: "
+          od -An -tx1 -j36 -N4 pdftops-lite
 
       - name: Sanity check generated PostScript on a tiny PDF
         run: |
           set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
           printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > tiny.pdf
-          qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps || \
-            (sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static && \
-             qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps)
-          head -40 tiny.ps
+          qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps
+          echo "--- generated PostScript (first 25 lines) ---"
+          head -25 tiny.ps
+          head -1 tiny.ps | grep -q '%!PS' && echo "OK: valid PostScript header"
 
       - uses: actions/upload-artifact@v4
         with:
           name: pdftops-lite-mipsel
           path: pdftops-lite
+          if-no-files-found: error

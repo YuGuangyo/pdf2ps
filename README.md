@@ -16,14 +16,29 @@ which the printer (HP LaserJet 400 M401d) understands natively.
 
 ## Build
 
-Cross compile for MIPS little-endian soft-float musl:
+Cross compile for MIPS little-endian soft-float musl. The toolchain is taken
+from the [`cross-tools/musl-cross`](https://github.com/cross-tools/musl-cross)
+GitHub Releases rather than musl.cc: it is smaller (61 MB vs 101 MB), hosted on
+GitHub (fast and reliable inside Actions), and ships a `.sha256` checksum.
 
 ```sh
-curl -fsSLO https://musl.cc/mipsel-linux-muslsf-cross.tgz
-tar xzf mipsel-linux-muslsf-cross.tgz
-CC=$PWD/mipsel-linux-muslsf-cross/bin/mipsel-linux-muslsf-gcc
-$CC -O2 -static -o pdftops-lite buf.c pdfobj.c psgen.c pdfimage.c main.c
+VER=20250928
+URL=https://github.com/cross-tools/musl-cross/releases/download/$VER
+curl -fsSLO $URL/mipsel-unknown-linux-muslsf.tar.xz
+curl -fsSLO $URL/mipsel-unknown-linux-muslsf.tar.xz.sha256
+echo "$(cat mipsel-unknown-linux-muslsf.tar.xz.sha256)  mipsel-unknown-linux-muslsf.tar.xz" > tc.check
+sha256sum -c tc.check
+tar xJf mipsel-unknown-linux-muslsf.tar.xz
+
+# bin/ contains only version-suffixed real files, no bare `gcc` symlink
+TC=mipsel-unknown-linux-muslsf
+ln -sf "$PWD/$TC/bin/mipsel-unknown-linux-muslsf-gcc-15.2.0" "$TC/bin/mipsel-gcc"
+"$TC/bin/mipsel-gcc" -O2 -static \
+    -o pdftops-lite buf.c pdfobj.c psgen.c pdfimage.c main.c -lm
 ```
+
+Alternatively just push and let `.github/workflows/build.yml` do it; the
+binary lands in the `pdftops-lite-mipsel` artifact.
 
 The resulting binary is a few hundred KB and runs on mipsel_24kc OpenWrt
 with no shared libraries.
