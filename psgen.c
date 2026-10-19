@@ -331,6 +331,7 @@ static int t3_translate_charproc(pdf_doc *doc, pdf_value *proc, buf_t *out) {
 
     buf_free(&src);
     return emitted;
+}
 
 /* Look up a font resource by name in the page /Font dictionary and, if it
  * is a Type3 font, flatten its glyphs into a t3font_t. Returns NULL when
@@ -474,7 +475,6 @@ static t3glyph_t *t3_glyph(t3font_t *tf, unsigned char code) {
     for (i = 0; i < tf->nglyphs; i++)
         if ((unsigned char)tf->glyphs[i].code == code) return &tf->glyphs[i];
     return NULL;
-}
 }
 
 /* Paint a Type3 string.
