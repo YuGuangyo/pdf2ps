@@ -121,9 +121,24 @@ int main(int argc, char **argv) {
 
     {
         pdf_value *root = NULL;
+        int debug = getenv("PDFTOPS_DEBUG") != NULL;
+        if (debug) {
+            int k, live = 0;
+            for (k = 1; k < doc->xref_size; k++)
+                if (doc->xref[k].offset > 0 || doc->xref[k].in_object_stream > 0) live++;
+            fprintf(stderr, "[dbg] len=%zu xref_size=%d live_objects=%d trailer=%s\n",
+                    doc->len, doc->xref_size, live, doc->trailer ? "present" : "NULL");
+            if (doc->trailer && doc->trailer->type == PDF_DICT)
+                fprintf(stderr, "[dbg] trailer keys=%d\n", doc->trailer->u.dict.count);
+        }
         if (doc->trailer) {
             pdf_value *r = pdf_dict_get(doc->trailer, "Root");
+            if (debug)
+                fprintf(stderr, "[dbg] /Root ref=%s\n", r ? "found" : "absent");
             root = pdf_resolve(doc, r);
+            if (debug)
+                fprintf(stderr, "[dbg] /Root resolved=%s\n",
+                        root ? (root->type == PDF_DICT ? "dict" : "other") : "NULL");
         }
         if (!root) {
             /*
@@ -135,6 +150,8 @@ int main(int argc, char **argv) {
                 pdf_value *v, *type;
                 if (doc->xref[i].offset <= 0 && doc->xref[i].in_object_stream == 0) continue;
                 v = pdf_get(doc, i);
+                if (debug && v)
+                    fprintf(stderr, "[dbg] obj %d type=%d\n", i, (int)v->type);
                 if (!v || v->type != PDF_DICT) continue;
                 type = pdf_dict_get(v, "Type");
                 if (type && pdf_name(type) && !strcmp(pdf_name(type), "Catalog")) root = v;
