@@ -19,7 +19,9 @@ void buf_free(buf_t *b) {
 }
 
 /*
- * Ensure at least `need` bytes are addressable past b->data.
+ * Ensure the buffer can address at least `need` bytes in total, i.e. the
+ * capacity becomes >= need. This is an *absolute* figure: callers that
+ * want to append n bytes must pass b->len + n.
  * Returns 1 on success, 0 on allocation failure.
  * NOTE: may realloc b->data, so callers must re-read b->data afterwards.
  */
@@ -27,8 +29,16 @@ int buf_reserve(buf_t *b, size_t need) {
     size_t ncap;
     unsigned char *nd;
     if (need <= b->cap) return 1;
+    /* Reject sizes that cannot be represented: growing by doubling would
+     * wrap around and hand back a tiny buffer, after which the caller's
+     * memcpy runs off the end. */
+    if (need > BUF_MAX_SIZE) return 0;
     ncap = b->cap ? b->cap : 4096;
-    while (ncap < need) ncap *= 2;
+    while (ncap < need) {
+        if (ncap > BUF_MAX_SIZE / 2) { ncap = BUF_MAX_SIZE; break; }
+        ncap *= 2;
+    }
+    if (ncap < need) ncap = need;
     nd = (unsigned char *)realloc(b->data, ncap);
     if (!nd) return 0;
     b->data = nd;
@@ -38,6 +48,10 @@ int buf_reserve(buf_t *b, size_t need) {
 
 int buf_put(buf_t *b, const void *p, size_t n) {
     if (n == 0) return 1;
+    /* b->len + n must not wrap: on a 32-bit target (the router) a bogus
+     * stream length can otherwise pass the capacity check and corrupt the
+     * heap. */
+    if (n > BUF_MAX_SIZE || b->len > BUF_MAX_SIZE - n) return 0;
     if (!buf_reserve(b, b->len + n)) return 0;
     memcpy(b->data + b->len, p, n);
     b->len += n;
@@ -156,7 +170,11 @@ static int inflate_block(buf_t *out, bitstream_t *bs, const huff_t *lit, const h
              * so data must be read after any single reallocation. */
             size_t start = out->len - (size_t)d;
             int k;
-            if (!buf_reserve(out, (size_t)len)) return -1;
+            /* Must reserve out->len + len bytes, not len: buf_reserve()
+             * checks the absolute capacity, so passing len alone almost
+             * always looks satisfied and the copy then writes past the
+             * end of the buffer. */
+            if (!buf_reserve(out, out->len + (size_t)len)) return -1;
             for (k = 0; k < len; k++) {
                 out->data[out->len] = out->data[start + (size_t)k];
                 out->len++;

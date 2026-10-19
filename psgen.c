@@ -126,6 +126,19 @@ void psgen_page_begin(psgen_t *g, double x0, double y0, double x1, double y1) {
     g->media_y0 = y0;
     g->media_x1 = x1;
     g->media_y1 = y1;
+    /* Type3 glyph caches live for exactly one page. */
+    if (g->fonts) {
+        int i;
+        for (i = 0; i < g->nfonts; i++) {
+            int k;
+            for (k = 0; k < g->fonts[i].nglyphs; k++)
+                free(g->fonts[i].glyphs[k].ps);
+        }
+        free(g->fonts);
+    }
+    g->fonts = NULL;
+    g->nfonts = 0;
+    g->fonts_cap = 0;
     ps_printf(g, "%%%%Page: %d %d\n", g->page_count, g->page_count + 1);
     ps_out(g, "gsave\n");
     /* PDF origin is bottom-left, same as PS: just translate mediabox origin */
@@ -205,7 +218,314 @@ static int stream_decode(pdf_doc *doc, pdf_value *stream, buf_t *out) {
     }
 }
 
-/* ---------------- text extraction ---------------- */
+/* ---------------- Type3 fonts ----------------
+ *
+ * Chromium/Skia prints CJK text by emitting one Type3 font per glyph. Each
+ * glyph's CharProc is a plain PDF path ("m", "l", "c", "h", "f") that maps
+ * almost 1:1 onto PostScript, so instead of rasterising we translate the
+ * path and paint it with the current text matrix. That keeps the output
+ * vector-sharp on a 1200 dpi LaserJet, which is the whole point of this
+ * filter.
+ */
+
+/* Append formatted text straight to a byte buffer. */
+static void gbuf_printf(buf_t *out, const char *fmt, ...) {
+    char tmp[256];
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    if (n > 0) buf_put(out, tmp, (size_t)n < sizeof tmp ? (size_t)n : sizeof tmp - 1);
+}
+
+static int gbuf_puts(buf_t *out, const char *s) {
+    return buf_put(out, s, strlen(s));
+}
+
+/* Translate one CharProc path program into PostScript path operators.
+ * Handles the subset Skia emits: m l c v y h re f f* S s B b W n plus
+ * numeric operands. Unknown operators are dropped with their operands. */
+static int t3_translate_charproc(pdf_doc *doc, pdf_value *proc, buf_t *out) {
+    buf_t src;
+    const unsigned char *p, *end;
+    double nums[8];
+    int nn = 0;
+    int emitted = 0;
+
+    if (!proc) return 0;
+    proc = pdf_resolve(doc, proc);
+    if (!proc || proc->type != PDF_STREAM) return 0;
+
+    buf_init(&src);
+    if (!stream_decode(doc, proc, &src)) { buf_free(&src); return 0; }
+
+    p = src.data;
+    end = src.data + src.len;
+
+    while (p < end) {
+        while (p < end && is_ws_pdf(*p)) p++;
+        if (p >= end) break;
+        if (*p == '%') { while (p < end && *p != '\n' && *p != '\r') p++; continue; }
+
+        /* numeric operand */
+        if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '+' || *p == '.') {
+            char *ep = NULL;
+            double v = strtod((const char *)p, &ep);
+            if (ep && ep > (const char *)p) {
+                if (nn < 8) nums[nn++] = v;
+                p = (const unsigned char *)ep;
+                continue;
+            }
+        }
+
+        {
+            char op[16];
+            int n = 0;
+            while (p < end && !is_ws_pdf(*p) && !is_delim_pdf(*p) && n < 15) op[n++] = (char)*p++;
+            op[n] = 0;
+            if (n == 0) { p++; continue; }
+
+            if (!strcmp(op, "d0") || !strcmp(op, "d1")) {
+                nn = 0;                    /* advance comes from /Widths */
+            } else if (!strcmp(op, "m") && nn >= 2) {
+                gbuf_printf(out, "%.3f %.3f moveto\n", nums[nn - 2], nums[nn - 1]);
+                emitted = 1; nn = 0;
+            } else if (!strcmp(op, "l") && nn >= 2) {
+                gbuf_printf(out, "%.3f %.3f lineto\n", nums[nn - 2], nums[nn - 1]);
+                nn = 0;
+            } else if (!strcmp(op, "c") && nn >= 6) {
+                gbuf_printf(out, "%.3f %.3f %.3f %.3f %.3f %.3f curveto\n",
+                            nums[nn - 6], nums[nn - 5], nums[nn - 4],
+                            nums[nn - 3], nums[nn - 2], nums[nn - 1]);
+                nn = 0;
+            } else if (!strcmp(op, "v") && nn >= 4) {
+                gbuf_printf(out, "%.3f %.3f %.3f %.3f curveto\n",
+                            nums[nn - 4], nums[nn - 3], nums[nn - 2], nums[nn - 1]);
+                nn = 0;
+            } else if (!strcmp(op, "y") && nn >= 4) {
+                gbuf_printf(out, "%.3f %.3f %.3f %.3f curveto\n",
+                            nums[nn - 4], nums[nn - 3], nums[nn - 2], nums[nn - 1]);
+                nn = 0;
+            } else if (!strcmp(op, "h")) {
+                gbuf_puts(out, "closepath\n"); nn = 0;
+            } else if (!strcmp(op, "re") && nn >= 4) {
+                gbuf_printf(out, "%.3f %.3f %.3f %.3f rect\n",
+                            nums[nn - 4], nums[nn - 3], nums[nn - 2], nums[nn - 1]);
+                nn = 0;
+            } else if (!strcmp(op, "f") || !strcmp(op, "f*") || !strcmp(op, "F")) {
+                gbuf_puts(out, "fill\n"); nn = 0;
+            } else if (!strcmp(op, "S") || !strcmp(op, "s")) {
+                gbuf_puts(out, "stroke\n"); nn = 0;
+            } else if (!strcmp(op, "B") || !strcmp(op, "B*") || !strcmp(op, "b")) {
+                gbuf_puts(out, "gsave fill grestore stroke\n"); nn = 0;
+            } else if (!strcmp(op, "W") || !strcmp(op, "W*")) {
+                gbuf_puts(out, "clip\n"); nn = 0;
+            } else if (!strcmp(op, "n")) {
+                gbuf_puts(out, "newpath\n"); nn = 0;
+            } else {
+                nn = 0;                    /* unknown operator: drop it */
+            }
+        }
+    }
+
+    buf_free(&src);
+    return emitted;
+
+/* Look up a font resource by name in the page /Font dictionary and, if it
+ * is a Type3 font, flatten its glyphs into a t3font_t. Returns NULL when
+ * the resource is missing or is a normal (non-Type3) font. */
+static t3font_t *t3_lookup(psgen_t *g, pdf_doc *doc, const char *resname) {
+    pdf_value *resources, *fonts, *fdict, *font;
+    t3font_t *tf;
+    pdf_value *subtype;
+    int i;
+
+    if (!g || !g->resources || !resname || !resname[0]) return NULL;
+
+    resources = pdf_resolve(doc, g->resources);
+    if (!resources || resources->type != PDF_DICT) return NULL;
+    fonts = pdf_resolve(doc, pdf_dict_get(resources, "Font"));
+    if (!fonts || fonts->type != PDF_DICT) return NULL;
+    fdict = pdf_resolve(doc, pdf_dict_get(fonts, resname));
+    if (!fdict || fdict->type != PDF_DICT) return NULL;
+
+    subtype = pdf_resolve(doc, pdf_dict_get(fdict, "Subtype"));
+    if (!subtype || !pdf_name(subtype) || strcmp(pdf_name(subtype), "Type3"))
+        return NULL;
+
+    /* already flattened? */
+    for (i = 0; i < g->nfonts; i++)
+        if (!strcmp(g->fonts[i].resname, resname)) return &g->fonts[i];
+
+    if (g->nfonts >= T3_MAX_FONTS) return NULL;
+    if (g->nfonts >= g->fonts_cap) {
+        int ncap = g->fonts_cap ? g->fonts_cap * 2 : 8;
+        t3font_t *nf = (t3font_t *)realloc(g->fonts, (size_t)ncap * sizeof(t3font_t));
+        if (!nf) return NULL;
+        g->fonts = nf;
+        g->fonts_cap = ncap;
+    }
+
+    tf = &g->fonts[g->nfonts];
+    memset(tf, 0, sizeof(*tf));
+    strncpy(tf->resname, resname, sizeof tf->resname - 1);
+
+    /* /FontMatrix, default 0.001 identity */
+    tf->matrix[0] = 0.001; tf->matrix[1] = 0; tf->matrix[2] = 0;
+    tf->matrix[3] = 0.001; tf->matrix[4] = 0; tf->matrix[5] = 0;
+    {
+        pdf_value *fm = pdf_resolve(doc, pdf_dict_get(fdict, "FontMatrix"));
+        if (fm && fm->type == PDF_ARRAY && fm->u.arr.count >= 6) {
+            int k;
+            for (k = 0; k < 6; k++) tf->matrix[k] = pdf_number(fm->u.arr.items[k]);
+        }
+    }
+
+    {
+        int first = 0, last = 0;
+        pdf_value *fc = pdf_resolve(doc, pdf_dict_get(fdict, "FirstChar"));
+        pdf_value *lc = pdf_resolve(doc, pdf_dict_get(fdict, "LastChar"));
+        pdf_value *widths = pdf_resolve(doc, pdf_dict_get(fdict, "Widths"));
+        pdf_value *enc = pdf_resolve(doc, pdf_dict_get(fdict, "Encoding"));
+        pdf_value *diffs = enc ? pdf_resolve(doc, pdf_dict_get(enc, "Differences")) : NULL;
+        pdf_value *procs = pdf_resolve(doc, pdf_dict_get(fdict, "CharProcs"));
+
+        if (fc) first = pdf_intval(fc);
+        if (lc) last = pdf_intval(lc);
+        if (first < 0) first = 0;
+        if (last > 255) last = 255;
+        if (last < first) {
+            /* no /LastChar: infer from the Differences array */
+            if (diffs && diffs->type == PDF_ARRAY) {
+                int cur = first;
+                int k;
+                for (k = 0; k < diffs->u.arr.count; k++) {
+                    pdf_value *it = diffs->u.arr.items[k];
+                    if (it->type == PDF_INT) cur = (int)it->u.i;
+                    else if (it->type == PDF_NAME) { cur++; if (cur - 1 > last) last = cur - 1; }
+                }
+            }
+        }
+        if (last < first) last = first;
+
+        {
+            int code;
+            int dstart = 0;      /* current code index inside /Differences */
+            int dcur = first;
+            for (code = first; code <= last && tf->nglyphs < T3_MAX_GLYPHS; code++) {
+                double w = 0;
+                const char *gname = NULL;
+                pdf_value *proc = NULL;
+
+                if (widths && widths->type == PDF_ARRAY) {
+                    int idx = code - first;
+                    if (idx >= 0 && idx < widths->u.arr.count)
+                        w = pdf_number(widths->u.arr.items[idx]);
+                }
+
+                /* walk /Differences once, tracking the running code number */
+                if (diffs && diffs->type == PDF_ARRAY) {
+                    while (dstart < diffs->u.arr.count && dcur <= code) {
+                        pdf_value *it = diffs->u.arr.items[dstart];
+                        if (it->type == PDF_INT) {
+                            dcur = (int)it->u.i;
+                            dstart++;
+                        } else if (it->type == PDF_NAME) {
+                            if (dcur == code) gname = pdf_name(it);
+                            dcur++;
+                            dstart++;
+                        } else {
+                            dstart++;
+                        }
+                    }
+                }
+
+                if (gname && procs && procs->type == PDF_DICT) {
+                    proc = pdf_dict_get(procs, gname);
+                    if (proc) {
+                        buf_t psbuf;
+                        buf_init(&psbuf);
+                        if (t3_translate_charproc(doc, proc, &psbuf) && psbuf.len > 0) {
+                            tf->glyphs[tf->nglyphs].code = (char)code;
+                            tf->glyphs[tf->nglyphs].width = w;
+                            tf->glyphs[tf->nglyphs].ps = (char *)malloc(psbuf.len + 1);
+                            if (tf->glyphs[tf->nglyphs].ps) {
+                                memcpy(tf->glyphs[tf->nglyphs].ps, psbuf.data, psbuf.len);
+                                tf->glyphs[tf->nglyphs].ps[psbuf.len] = 0;
+                                tf->nglyphs++;
+                            }
+                        }
+                        buf_free(&psbuf);
+                    }
+                }
+            }
+        }
+    }
+
+    g->nfonts++;
+    return tf;
+}
+
+/* Find the flattened glyph for a byte code, or NULL. */
+static t3glyph_t *t3_glyph(t3font_t *tf, unsigned char code) {
+    int i;
+    if (!tf) return NULL;
+    for (i = 0; i < tf->nglyphs; i++)
+        if ((unsigned char)tf->glyphs[i].code == code) return &tf->glyphs[i];
+    return NULL;
+}
+}
+
+/* Paint a Type3 string.
+ *
+ * PDF Type3 glyphs are drawn in glyph space, then mapped to text space with
+ * /FontMatrix, then to device space by the text matrix. PostScript has no
+ * equivalent of "render this path as a glyph", so for each character we:
+ *   gsave
+ *   <glyph matrix> concat        -- text matrix * size * FontMatrix
+ *   <translated path>
+ *   grestore
+ *   <width> 0 Td                 -- advance the text position
+ * The text matrix is applied via `concat` because Tm/Td state is kept by
+ * the PostScript interpreter, and `concat` composes with it. */
+static void t3_show(psgen_t *g, t3font_t *tf, double size, opstack_t *st, double *tm) {
+    int i;
+    /* Composite matrix for one glyph: Trm = Tm x [size 0 0 size 0 0] x FontMatrix
+     * Since size is folded into the matrix we pass the FontMatrix pre-scaled. */
+    for (i = 0; i < st->n; i++) {
+        size_t k;
+        if (st->ops[i].kind != 1) continue;
+        for (k = 0; k < st->ops[i].str.len; k++) {
+            unsigned char code = st->ops[i].str.data[k];
+            t3glyph_t *gl = t3_glyph(tf, code);
+            if (gl && gl->ps) {
+                /* glyph->text space is FontMatrix(6); text->user is Tm.
+                 * concat expects a 6-element array, so multiply the two. */
+                double a = tm[0] * tf->matrix[0] * size + tm[2] * tf->matrix[1] * size;
+                double b = tm[1] * tf->matrix[0] * size + tm[3] * tf->matrix[1] * size;
+                double c = tm[0] * tf->matrix[2] * size + tm[2] * tf->matrix[3] * size;
+                double d = tm[1] * tf->matrix[2] * size + tm[3] * tf->matrix[3] * size;
+                double e = tm[0] * (tf->matrix[4] * size) + tm[2] * (tf->matrix[5] * size) + tm[4];
+                double f = tm[1] * (tf->matrix[4] * size) + tm[3] * (tf->matrix[5] * size) + tm[5];
+                ps_out(g, "gsave\n");
+                ps_printf(g, "[ %.6f %.6f %.6f %.6f %.4f %.4f ] concat\n", a, b, c, d, e, f);
+                ps_out(g, gl->ps);
+                ps_out(g, "grestore\n");
+            }
+            {
+                /* advance in text space = width * FontMatrix[0] * size */
+                double adv = (gl ? gl->width : 500.0) * tf->matrix[0] * size;
+                if (adv <= 0) adv = (gl ? gl->width : 500.0) * size * 0.001;
+                if (adv > 0) {
+                    ps_printf(g, "%.4f 0 Td\n", adv);
+                    tm[4] += tm[0] * adv;
+                    tm[5] += tm[1] * adv;
+                }
+            }
+        }
+    }
+}
 
 /* Decode a PDF string into unicode-ish bytes for PostScript output.
  * Standard-14 fonts use Latin-1 for codes < 256, which PostScript can show
@@ -236,6 +556,12 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
     opstack_t st;
     char font_name[128];
     char last_name[128];
+    t3font_t *cur_t3 = NULL;
+    double cur_size = 12.0;
+    /* Text state tracked in C so Type3 glyph paths can be placed exactly.
+     * tm is the text matrix (PDF 3x3 with the last row 0 0 1, stored as the
+     * six meaningful numbers), tlm the text line matrix. */
+    double tm[6], tlm[6];
 
     if (depth > 8) return;
     buf_init(&content);
@@ -248,6 +574,8 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
     st.n = 0;
     font_name[0] = 0;
     last_name[0] = 0;
+    tm[0] = 1; tm[1] = 0; tm[2] = 0; tm[3] = 1; tm[4] = 0; tm[5] = 0;
+    tlm[0] = 1; tlm[1] = 0; tlm[2] = 0; tlm[3] = 1; tlm[4] = 0; tlm[5] = 0;
 
     while (p < end) {
         const unsigned char *save;
@@ -380,36 +708,61 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
             if (n == 0) { p++; continue; }
 
             if (!strcmp(op, "Tj") || !strcmp(op, "'") || !strcmp(op, "\"")) {
-                emit_text(g, &st);
+                if (cur_t3) t3_show(g, cur_t3, cur_size, &st, tm);
+                else emit_text(g, &st);
                 if (!strcmp(op, "'")) { ps_out(g, "0 -1.2 Tm 0 0 Td\n"); }
                 ops_reset(&st);
             } else if (!strcmp(op, "TJ")) {
-                emit_text(g, &st);
+                if (cur_t3) t3_show(g, cur_t3, cur_size, &st, tm);
+                else emit_text(g, &st);
                 ops_reset(&st);
             } else if (!strcmp(op, "Tf")) {
-                const char *psf = map_font(last_name[0] ? last_name : font_name);
-                if (st.n >= 2) {
-                    double sz = num_at(&st, st.n - 1);
-                    if (sz <= 0.1) sz = 12.0;
+                const char *resname = last_name[0] ? last_name : font_name;
+                double sz = (st.n >= 1) ? num_at(&st, st.n - 1) : 0.0;
+                if (sz <= 0.1) sz = 12.0;
+                cur_size = sz;
+                /* Type3 fonts carry their own glyph paths; normal fonts map
+                 * onto a standard PostScript face. */
+                cur_t3 = t3_lookup(g, doc, resname);
+                if (!cur_t3) {
+                    const char *psf = map_font(resname);
                     ps_printf(g, "/%s findfont %.3f scalefont setfont\n", psf, sz);
                 }
                 ops_reset(&st);
             } else if (!strcmp(op, "Td")) {
-                if (st.n >= 2) ps_printf(g, "%.4f %.4f Td\n", num_at(&st, st.n - 2), num_at(&st, st.n - 1));
+                if (st.n >= 2) {
+                    double tx = num_at(&st, st.n - 2), ty = num_at(&st, st.n - 1);
+                    ps_printf(g, "%.4f %.4f Td\n", tx, ty);
+                    /* tlm = translate(tx,ty) x tlm ; tm = tlm */
+                    tlm[4] = tlm[0] * tx + tlm[2] * ty + tlm[4];
+                    tlm[5] = tlm[1] * tx + tlm[3] * ty + tlm[5];
+                    memcpy(tm, tlm, sizeof tm);
+                }
                 ops_reset(&st);
             } else if (!strcmp(op, "TD")) {
-                if (st.n >= 2) ps_printf(g, "%.4f %.4f Td\n", num_at(&st, st.n - 2), num_at(&st, st.n - 1));
+                if (st.n >= 2) {
+                    double tx = num_at(&st, st.n - 2), ty = num_at(&st, st.n - 1);
+                    ps_printf(g, "%.4f %.4f Td\n", tx, ty);
+                    tlm[4] = tlm[0] * tx + tlm[2] * ty + tlm[4];
+                    tlm[5] = tlm[1] * tx + tlm[3] * ty + tlm[5];
+                    memcpy(tm, tlm, sizeof tm);
+                }
                 ops_reset(&st);
             } else if (!strcmp(op, "Tm")) {
                 if (st.n >= 6) {
-                    ps_printf(g, "[ %.4f %.4f %.4f %.4f %.4f %.4f ] Tm\n",
-                              num_at(&st, st.n - 6), num_at(&st, st.n - 5),
-                              num_at(&st, st.n - 4), num_at(&st, st.n - 3),
-                              num_at(&st, st.n - 2), num_at(&st, st.n - 1));
+                    double a = num_at(&st, st.n - 6), b = num_at(&st, st.n - 5);
+                    double c = num_at(&st, st.n - 4), d = num_at(&st, st.n - 3);
+                    double e = num_at(&st, st.n - 2), f = num_at(&st, st.n - 1);
+                    ps_printf(g, "[ %.4f %.4f %.4f %.4f %.4f %.4f ] Tm\n", a, b, c, d, e, f);
+                    tlm[0] = a; tlm[1] = b; tlm[2] = c;
+                    tlm[3] = d; tlm[4] = e; tlm[5] = f;
+                    memcpy(tm, tlm, sizeof tm);
                 }
                 ops_reset(&st);
             } else if (!strcmp(op, "BT")) {
                 ps_out(g, "gsave\n");
+                tm[0] = 1; tm[1] = 0; tm[2] = 0; tm[3] = 1; tm[4] = 0; tm[5] = 0;
+                memcpy(tlm, tm, sizeof tm);
                 ops_reset(&st);
             } else if (!strcmp(op, "ET")) {
                 ps_out(g, "grestore\n");
@@ -521,3 +874,5 @@ void psgen_page_content(pdf_doc *doc, psgen_t *g, pdf_value *contents) {
         }
     }
 }
+
+
