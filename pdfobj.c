@@ -415,7 +415,14 @@ int pdf_intval(pdf_value *v) {
 
 static void ensure_xref_capacity(pdf_doc *doc, int size) {
     int i;
-    if (size <= doc->xref_size) return;
+    /*
+     * xref_size is 'one past the highest usable index', i.e. valid indices
+     * are 0..xref_size-1. Writing index `size` therefore requires a table
+     * of at least size+1 entries, so only a strictly smaller index can be
+     * served by the current allocation. Using `<=` here let index
+     * `xref_size` be written out of bounds.
+     */
+    if (size < doc->xref_size) return;
     {
         xref_entry *nx = (xref_entry *)realloc(doc->xref, (size_t)(size + 1) * sizeof(xref_entry));
         if (!nx) return;
