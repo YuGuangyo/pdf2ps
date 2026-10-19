@@ -55,19 +55,23 @@ jobs:
           fi
           ls -l tc.tar.xz
           xz -t tc.tar.xz
-          tar xJf tc.tar.xz
-          # 归档内的 bin 里只有带版本号后缀的真实文件，没有裸 gcc 软链接
+          # 不要保留归档里的属主/权限位：runner 用户不是 root，保留 755+root
+          # 会让后续任何写入该树的操作失败。
+          tar xJf tc.tar.xz --no-same-owner
+          # 确保工具可执行、目录可写，避免权限位带来的意外失败
+          chmod -R u+rwX "$TC_DIR"
+          find "$TC_DIR/bin" -maxdepth 1 -type f -exec chmod +x {} +
+          # bin/ 里既有带版本号的真实文件，也有裸名 gcc 软链接
           ls -1 "$TC_DIR/bin/" | head -20
           "$TC_DIR/bin/$TC_GCC" --version | head -1
 
       - name: Compile pdftops-lite
         run: |
           set -euo pipefail
-          # 建一个裸名软链接，方便直接调用。
-          # 注意用绝对路径做链接目标：相对路径会被 ln 解释为相对于链接所在目录。
-          ln -sf "$PWD/$TC_DIR/bin/$TC_GCC" "$TC_DIR/bin/mipsel-gcc"
-          CC=$PWD/"$TC_DIR/bin/mipsel-gcc"
-          ls -l "$TC_DIR/bin/mipsel-gcc"
+          # 归档里的 bin/ 保持 755、属主 root，任务用户无法在其中建软链接
+          # （曾因此报 `ln: Permission denied`），所以直接调用带版本号的文件。
+          CC=$PWD/"$TC_DIR/bin/$TC_GCC"
+          ls -l "$CC"
           "$CC" --version | head -1
           # psgen.c 包含 <math.h>，静态链接时把 -lm 带上更保险
           # 三元组 mipsel-... 已隐含小端，无需 -EL
