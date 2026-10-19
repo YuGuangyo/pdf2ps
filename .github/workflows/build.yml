@@ -119,7 +119,7 @@ jobs:
           print("tiny.pdf:", len(out), "bytes, xref at", xref_at)
           PY
 
-          qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps
+          PDFTOPS_DEBUG=1 qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps
           echo "--- generated PostScript (first 25 lines) ---"
           head -25 tiny.ps
           head -1 tiny.ps | grep -q '%!PS' && echo "OK: valid PostScript header"
