@@ -27,7 +27,10 @@
 
 #define PSF_MAX_GLYPH 256
 
-typedef struct psfont psfont_t;
+/* The struct is defined in psfont.c as `struct psfont_s`; only the typedef is
+ * visible to callers. */
+struct psfont_s;
+typedef struct psfont_s psfont_t;
 
 /* Counters for reporting: real vector work done vs. faces substituted. */
 extern unsigned long psfont_glyph_draws;
