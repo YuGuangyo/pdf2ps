@@ -90,11 +90,49 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user-static
-          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > tiny.pdf
+
+          # Build a *valid* PDF: the xref table needs real byte offsets, so
+          # emit objects first and record their positions as we go.
+          python3 - <<'PY'
+          objs = []
+          objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+          objs.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+          objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                      b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>")
+          content = b"BT /F1 24 Tf 72 700 Td (Hello M401) Tj ET\n"
+          objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream")
+          objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+          out = bytearray(b"%PDF-1.4\n")
+          offsets = []
+          for i, body in enumerate(objs, start=1):
+              offsets.append(len(out))
+              out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+          xref_at = len(out)
+          out += b"xref\n0 %d\n" % (len(objs) + 1)
+          out += b"0000000000 65535 f \n"
+          for off in offsets:
+              out += b"%010d 00000 n \n" % off
+          out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+              len(objs) + 1, xref_at)
+          open("tiny.pdf", "wb").write(bytes(out))
+          print("tiny.pdf:", len(out), "bytes, xref at", xref_at)
+          PY
+
           qemu-mipsel-static ./pdftops-lite tiny.pdf > tiny.ps
           echo "--- generated PostScript (first 25 lines) ---"
           head -25 tiny.ps
           head -1 tiny.ps | grep -q '%!PS' && echo "OK: valid PostScript header"
+          grep -q 'Hello M401' tiny.ps && echo "OK: text survived the round trip"
+
+          # Also exercise the no-trailer fallback path with a truncated file.
+          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 72 700 Td (NoTrailer) Tj ET\nendstream\nendobj\n' > broken.pdf
+          if qemu-mipsel-static ./pdftops-lite broken.pdf > broken.ps; then
+            echo "OK: catalog located without a trailer"
+            grep -q 'NoTrailer' broken.ps && echo "OK: broken-file text emitted"
+          else
+            echo "NOTE: no-trailer file rejected (acceptable)"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

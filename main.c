@@ -126,6 +126,21 @@ int main(int argc, char **argv) {
             root = pdf_resolve(doc, r);
         }
         if (!root) {
+            /*
+             * Truncated / hand-written PDFs sometimes lack a trailer or the
+             * /Root link. Fall back to scanning for the catalog object.
+             */
+            int i;
+            for (i = 1; i < doc->xref_size && !root; i++) {
+                pdf_value *v, *type;
+                if (doc->xref[i].offset <= 0 && doc->xref[i].in_object_stream == 0) continue;
+                v = pdf_get(doc, i);
+                if (!v || v->type != PDF_DICT) continue;
+                type = pdf_dict_get(v, "Type");
+                if (type && pdf_name(type) && !strcmp(pdf_name(type), "Catalog")) root = v;
+            }
+        }
+        if (!root) {
             fprintf(stderr, "pdftops-lite: missing document catalog\n");
             pdf_close(doc);
             return 1;

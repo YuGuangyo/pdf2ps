@@ -547,12 +547,21 @@ static void find_trailer(pdf_doc *doc) {
         doc->trailer = parse_object(&lx, 0);
     }
     if (!doc->trailer) {
-        /* fall back: any dict with a /Root entry */
+        /*
+         * No "trailer" keyword. Either the file is xref-stream based (the
+         * /Root lives in the xref stream dict), or it is malformed and the
+         * caller has to locate the catalog itself (see main.c).
+         */
         int i;
-        for (i = doc->xref_size - 1; i > 0; i--) {
-            if (doc->xref[i].offset > 0 || doc->xref[i].in_object_stream > 0) {
-                pdf_value *v = doc->xref[i].in_object_stream > 0 ? NULL : NULL;
-                (void)v;
+        for (i = 1; i < doc->xref_size; i++) {
+            pdf_value *v, *type;
+            if (doc->xref[i].offset <= 0) continue;
+            v = pdf_get(doc, i);
+            if (!v || v->type != PDF_DICT) continue;
+            type = pdf_dict_get(v, "Type");
+            if (type && pdf_name(type) && !strcmp(pdf_name(type), "XRef")) {
+                doc->trailer = v;          /* xref stream dict carries /Root */
+                break;
             }
         }
     }
