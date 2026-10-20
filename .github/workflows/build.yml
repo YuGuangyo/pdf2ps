@@ -243,6 +243,7 @@ jobs:
                  ./pdftops-asan "$f" > "out/$name.ps" 2> "out/$name.err"; then
               echo "OK  exit=0  ps=$(wc -c < "out/$name.ps") bytes"
               head -1 "out/$name.ps"
+              echo "--- stderr ---"; cat "out/$name.err"
             else
               rc=$?
               echo "FAIL exit=$rc"
