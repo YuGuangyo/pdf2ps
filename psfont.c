@@ -756,7 +756,7 @@ static char *t3_translate(pdf_doc *doc, pdf_value *charproc, double *out_wx) {
 /* Font object -> psfont_t                                             */
 /* ------------------------------------------------------------------ */
 
-static int setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
+static void setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
     pdf_value *procs, *widths, *matrix;
     double fm[6];
     int i;
@@ -787,7 +787,7 @@ static int setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
         f->have_widths = 1;
     }
 
-    if (!procs || procs->type != PDF_DICT) return f;
+    if (!procs || procs->type != PDF_DICT) return;
 
     /*
      * /Encoding /Differences names the glyph for each code. Without it we
@@ -854,10 +854,10 @@ static int setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
             }
         }
     }
-    return f;
+    return;
 }
 
-static int setup_simple(psfont_t *f, pdf_doc *doc, pdf_value *fdict,
+static void setup_simple(psfont_t *f, pdf_doc *doc, pdf_value *fdict,
                         const char *subtype) {
     pdf_value *bf = pdf_resolve(doc, pdf_dict_get(fdict, "BaseFont"));
     const char *bname = pdf_name(bf);
@@ -887,7 +887,7 @@ static int setup_simple(psfont_t *f, pdf_doc *doc, pdf_value *fdict,
         }
         f->have_widths = 1;
     }
-    return f;
+    return;
 }
 
 /*
@@ -898,7 +898,7 @@ static int setup_simple(psfont_t *f, pdf_doc *doc, pdf_value *fdict,
  * /Identity, also the glyph indices. That covers what Android, iOS and
  * Skia PDF writers actually emit for CJK and symbol text.
  */
-static int setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
+static void setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
     pdf_value *enc, *encname, *desc, *c2g, *ff;
     const char *en = NULL;
 
@@ -930,7 +930,7 @@ static int setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
         f->kind = PSF_SIMPLE_MAPPED;
         snprintf(f->psname, sizeof(f->psname), "Helvetica");
         psfont_fallback_count++;
-        return f;
+        return;
     }
 
     /* Load the embedded TrueType program, if any. */
@@ -965,7 +965,7 @@ static int setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
         snprintf(f->psname, sizeof(f->psname), "%s", map_font(pdf_name(bf)));
         psfont_fallback_count++;
     }
-    return f;
+    return;
 }
 
 psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname) {
@@ -988,7 +988,7 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
          * reference fonts through a nested /Font dict; try one more level
          * before giving up.
          */
-        return NULL;
+        return;
     }
 
     sub = pdf_resolve(doc, pdf_dict_get(fdict, "Subtype"));
@@ -1008,7 +1008,7 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
     }
 
     cache_add(f);
-    return f;
+    return;
 }
 /* ------------------------------------------------------------------ */
 /* Emission                                                            */
