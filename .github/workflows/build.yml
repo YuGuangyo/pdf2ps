@@ -111,13 +111,11 @@ jobs:
           if command -v readelf >/dev/null; then
             readelf -A pdftops-lite | tee /tmp/abiflags.txt
             fpabi=$(grep -o 'FP ABI: [^ ]*' /tmp/abiflags.txt | head -1 | awk '{print $3}')
-            case "$fpabi" in
-              0|Hard-float*(-1)*|Soft-float*(-1)*) : ;;  # 用下面的通用判断
-            esac
-            if grep -q 'abiflags' /tmp/abiflags.txt && ! grep -qi 'Hard float' /tmp/abiflags.txt; then
+            if grep -qi 'Hard float' /tmp/abiflags.txt; then
+              echo "::error::hard-float ABI (.MIPS.abiflags FP ABI $fpabi) -- will SIGILL on the 1004Kc"
+              exit 1
+            elif grep -q 'abiflags' /tmp/abiflags.txt; then
               echo "OK   abiflags: soft-float (FP ABI $fpabi)"
-            elif grep -qi 'Hard float' /tmp/abiflags.txt; then
-              echo "::error::hard-float ABI in .MIPS.abiflags -- will SIGILL on the 1004Kc"; exit 1
             else
               echo "WARN abiflags section missing; relying on the qemu run below"
             fi
