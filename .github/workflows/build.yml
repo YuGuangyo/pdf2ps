@@ -166,18 +166,18 @@ jobs:
           ])
 
           # ---- 2. type3.pdf : 模拟 Skia Type3 位图字体 ----
-          # 这是手机 Chrome 打印 PDF 的真实形态：159 个 Type3 字体，
-          # /Differences 里大量重复的 /g0（空字形）指向同一个 CharProc。
+          # 这是手机 Chrome 打印 PDF 的真实形态：Type3 位图字体，字形是纯矩形。
+          # 注意内容流里必须是「字符码」，不是 ASCII 字母：/Differences 从 0
+          # 开始逐项给码 0..3 分配字形，所以字符串要写成 \0\1\2\3。
           glyph = (b"500 0 0 0 500 700 d1\n"
                    b"0 0 500 700 re f\n")
+          t3run = b"BT /F10 24 Tf 72 700 Td (\x00\x01\x02\x03) Tj ET\n"
           write_pdf("testdata/type3.pdf", [
               b"<< /Type /Catalog /Pages 2 0 R >>",
               b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
               b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
               b"/Resources << /Font << /F10 5 0 R >> >> /Contents 4 0 R >>",
-              b"<< /Length %d >>\nstream\n" % len(
-                  b"BT /F10 24 Tf 72 700 Td (AAAA) Tj ET\n")
-              + b"BT /F10 24 Tf 72 700 Td (AAAA) Tj ET\nendstream",
+              b"<< /Length %d >>\nstream\n" % len(t3run) + t3run + b"endstream",
               b"<< /Type /Font /Subtype /Type3 /Name /F10 "
               b"/FontBBox[ 69 84 921 -796] /FontMatrix[ .001 0 0 .001 0 0 ] "
               b"/CharProcs << /g0 6 0 R >> "
