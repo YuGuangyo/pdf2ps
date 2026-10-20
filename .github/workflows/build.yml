@@ -249,7 +249,14 @@ jobs:
           need out/tiny.pdf.ps  '^%!PS'       'tiny: PS header'
           need out/cs.pdf.ps    'page one'    'cs: page one'
           need out/cs.pdf.ps    'page two'    'cs: page two'
-          need out/type3.pdf.ps 'AAAA'        'type3: text emitted'
+          # Type3 glyphs are painted as paths, so the literal source text never
+          # appears in the output -- assert on the painting operators instead.
+          need out/type3.pdf.ps 'eofill'      'type3: glyph filled'
+          need out/type3.pdf.ps 'lineto'      'type3: path drawn'
+          count=$(grep -c 'eofill' out/type3.pdf.ps || true)
+          if [ "${count:-0}" -lt 4 ]; then
+            echo "::error::type3: expected >=4 glyph fills for AAAA, got ${count:-0}"; bad=1
+          else echo "OK   type3: $count glyph fills (AAAA)"; fi
           if [ "$(grep -c '%%Page:' out/cs.pdf.ps)" != "2" ]; then
             echo "::error::cs: expected 2 pages, got $(grep -c '%%Page:' out/cs.pdf.ps)"; bad=1
           else echo "OK   cs: 2 pages"; fi
