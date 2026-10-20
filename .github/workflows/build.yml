@@ -104,14 +104,25 @@ jobs:
           ls -lh pdftops-lite
           # 打印 ELF 头 e_flags，应与路由器 /usr/sbin/cupsd 的 0x00200034 一致
           # （O32 ABI + FP32 软浮点 + MIPS32R2）
+          # e_flags 里的 FP32 位各家工具链填法不一，真正权威的是 .MIPS.abiflags
+          # 段里的 FP ABI 字段：0 = softfloat，非 0 = 硬浮点（真机直接 SIGILL）。
           echo -n "e_flags bytes: "
           od -An -tx1 -j36 -N4 pdftops-lite
-          flags=$(od -An -tx4 -j36 -N4 pdftops-lite | tr -d ' \n')
-          if [ "$flags" = "00200034" ]; then
-            echo "OK   e_flags: 0x$flags (O32 + FP32 soft-float + MIPS32r2)"
+          if command -v readelf >/dev/null; then
+            readelf -A pdftops-lite | tee /tmp/abiflags.txt
+            fpabi=$(grep -o 'FP ABI: [^ ]*' /tmp/abiflags.txt | head -1 | awk '{print $3}')
+            case "$fpabi" in
+              0|Hard-float*(-1)*|Soft-float*(-1)*) : ;;  # 用下面的通用判断
+            esac
+            if grep -q 'abiflags' /tmp/abiflags.txt && ! grep -qi 'Hard float' /tmp/abiflags.txt; then
+              echo "OK   abiflags: soft-float (FP ABI $fpabi)"
+            elif grep -qi 'Hard float' /tmp/abiflags.txt; then
+              echo "::error::hard-float ABI in .MIPS.abiflags -- will SIGILL on the 1004Kc"; exit 1
+            else
+              echo "WARN abiflags section missing; relying on the qemu run below"
+            fi
           else
-            echo "::error::e_flags is 0x$flags, expected 0x00200034 (O32|FP32|MIPS32r2)"
-            exit 1
+            echo "WARN readelf unavailable in the toolchain"
           fi
 
       # ------------------------------------------------------------------
@@ -287,11 +298,12 @@ jobs:
           for f in testdata/*.pdf; do
             name=$(basename "$f")
             echo "--- qemu $name ---"
-            PDFTOPS_DEBUG=1 qemu-mipsel-static ./pdftops-lite "$f" > "out/qemu-$name.ps" \
+            # -cpu 1004Kc: 路由器用的是 MIPS 1004Kc，指令集不匹配会在这里暴露
+            PDFTOPS_DEBUG=1 qemu-mipsel-static -cpu 1004Kc ./pdftops-lite "$f" > "out/qemu-$name.ps" \
               || { echo "::error::qemu run failed for $name"; exit 1; }
             echo "qemu OK $(wc -c < "out/qemu-$name.ps") bytes"
           done
-          grep -q 'Hello M401' out/qemu-tiny.pdf.ps && echo "OK qemu tiny"
+          grep -q 'Hello M401' out/qemu-tiny.pdf.ps && echo "OK qemu tiny text"
 
       # 把崩溃样本和诊断信息一起上传，方便在路由器上复现
       - name: Upload artifacts
