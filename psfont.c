@@ -1102,6 +1102,13 @@ static void advance_tm(FILE *out, double *tm, double adv) {
 static void show_type3(psfont_t *f, FILE *out, const unsigned char *s, size_t n,
                        double *tm) {
     size_t k;
+    if (getenv("PDFTOPS_DEBUG")) {
+        size_t hits = 0, q;
+        for (q = 0; q < n; q++) if (f->t3[(unsigned char)s[q]].ps) hits++;
+        fprintf(stderr, "[t3] show n=%lu glyphs_with_ps=%lu first_byte=%d\n",
+                (unsigned long)n, (unsigned long)hits,
+                n ? (int)s[0] : -1);
+    }
     for (k = 0; k < n; k++) {
         int code = s[k];
         t3g_t *gl = &f->t3[code];
