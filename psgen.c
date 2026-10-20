@@ -220,15 +220,9 @@ static int stream_decode(pdf_doc *doc, pdf_value *stream, buf_t *out) {
 static void show_operands(psgen_t *g, psfont_t *cur, opstack_t *st, double *tm) {
     int i;
     if (st->n <= 0) return;
-    if (getenv("PDFTOPS_DEBUG")) {
-        fprintf(stderr, "[dbg] show_operands n=%d font=%s\n", st->n, cur ? "ok" : "NULL");
-    }
     for (i = 0; i < st->n; i++) {
         operand_t *o = &st->ops[i];
         if (o->kind == 1) {
-            if (getenv("PDFTOPS_DEBUG")) {
-                fprintf(stderr, "[dbg] str len=%lu\n", (unsigned long)o->str.len);
-            }
             if (o->str.len) psfont_show(cur, g->out, o->str.data, o->str.len, tm);
         } else if (o->kind == 0) {
             /* TJ number: displace in text space */
@@ -418,10 +412,6 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
                 if (sz <= 0.1) sz = 12.0;
                 g->cur_size = sz;
                 cur_font = psfont_resolve(doc, g->resources, resname);
-                if (getenv("PDFTOPS_DEBUG")) {
-                    fprintf(stderr, "[dbg] Tf resname='%s' size=%.2f font=%s\n",
-                            resname, sz, cur_font ? "ok" : "NULL");
-                }
                 psfont_set(cur_font, g->out, sz);
                 /* The resource name and the size were both consumed by Tf;
                  * leaving them on the stack would corrupt the next operator's
@@ -594,5 +584,4 @@ void psgen_page_content(pdf_doc *doc, psgen_t *g, pdf_value *contents) {
         }
     }
 }
-
 

@@ -925,9 +925,13 @@ static void setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
         f->descendant = pdf_resolve(doc, desc->u.arr.items[0]);
 
     if (!f->identity) {
-        /* Unknown CMap: we cannot map codes to glyphs reliably. Fall back to
-         * a standard face and count it so tests can see the degradation. */
+        /* Unknown CMap: we cannot map codes to glyphs reliably. Keep the
+         * composite flag OFF so the emitted text still reaches the page as
+         * literal bytes -- dropping composite makes psfont_show fall through
+         * to the /Helvetica branch, so Latin glyphs come out readable instead
+         * of the page staying blank. Count it so tests can see the fallback. */
         f->kind = PSF_SIMPLE_MAPPED;
+        f->composite = 0;
         snprintf(f->psname, sizeof(f->psname), "Helvetica");
         psfont_fallback_count++;
         return;
@@ -962,6 +966,9 @@ static void setup_type0(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
     f->kind = f->tt_ready ? PSF_TRUETYPE_CID : PSF_SIMPLE_MAPPED;
     if (!f->tt_ready) {
         pdf_value *bf = pdf_resolve(doc, pdf_dict_get(fdict, "BaseFont"));
+        /* No usable embedded program: draw the raw codes through a standard
+         * face rather than advancing the pen over invisible text. */
+        f->composite = 0;
         snprintf(f->psname, sizeof(f->psname), "%s", map_font(pdf_name(bf)));
         psfont_fallback_count++;
     }
@@ -1129,8 +1136,9 @@ void psfont_show(psfont_t *f, FILE *out, const unsigned char *s, size_t n,
             break;
         case PSF_SIMPLE_MAPPED:
             /* 2-byte codes on a 1-byte face: showing them raw would emit two
-             * Latin-1 characters per glyph. Emit the low byte only, which at
-             * least keeps spacing sane and is visibly a fallback. */
+             * Latin-1 characters per glyph. Emit each high byte's printable
+             * partner only when it maps to ASCII, so something lands on the
+             * page instead of nothing at all. */
             if (f->composite) {
                 size_t k;
                 for (k = 0; k + 1 < n; k += 2) advance_tm(out, tm, 0.5);
