@@ -584,4 +584,3 @@ void psgen_page_content(pdf_doc *doc, psgen_t *g, pdf_value *contents) {
         }
     }
 }
-

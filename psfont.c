@@ -779,13 +779,6 @@ static void setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
     matrix = pdf_resolve(doc, pdf_dict_get(fdict, "FontMatrix"));
 
     f->kind = PSF_TYPE3;
-    if (getenv("PDFTOPS_DEBUG")) {
-        fprintf(stderr, "[t3] enter procs=%s widths=%s matrix=%s first=%d\n",
-                procs ? (procs->type == PDF_DICT ? "dict" : "other") : "NULL",
-                widths ? (widths->type == PDF_ARRAY ? "arr" : "other") : "NULL",
-                matrix ? "ok" : "NULL",
-                (int)num_or(fdict, "FirstChar", 0));
-    }
     f->t3matrix[0] = 0.001; f->t3matrix[1] = 0;
     f->t3matrix[2] = 0;     f->t3matrix[3] = 0.001;
     f->t3matrix[4] = 0;     f->t3matrix[5] = 0;
@@ -831,17 +824,9 @@ static void setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
                     if (!gname) continue;
                     if (cur < 0 || cur >= PSF_MAX_GLYPH) { cur++; continue; }
                     proc = pdf_resolve(doc, pdf_dict_get(procs, gname));
-                    if (getenv("PDFTOPS_DEBUG")) {
-                        fprintf(stderr, "[t3] diff cur=%d name='%s' proc=%s\n", cur, gname,
-                                !proc ? "NULL" : (proc->type == PDF_STREAM ? "stream" : "other"));
-                    }
                     if (proc && proc->type == PDF_STREAM) {
                         double wx = 0;
                         char *body = t3_translate(doc, proc, &wx);
-                        if (getenv("PDFTOPS_DEBUG")) {
-                            fprintf(stderr, "[t3]   translated: %s wx=%.2f\n",
-                                    body ? "ok" : "NULL", wx);
-                        }
                         if (!f->t3[cur].used) f->t3[cur].used = 1;
                         if (body) {
                             if (f->t3[cur].ps) free(f->t3[cur].ps);
@@ -1017,14 +1002,6 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
     if (!fonts || fonts->type != PDF_DICT) return NULL;
 
     fdict = pdf_resolve(doc, pdf_dict_get(fonts, resname));
-    if (getenv("PDFTOPS_DEBUG")) {
-        int i;
-        fprintf(stderr, "[t3] resolve '%s': fonts has %d keys:", resname, fonts->u.dict.count);
-        for (i = 0; i < fonts->u.dict.count && i < 8; i++)
-            fprintf(stderr, " [%s]", fonts->u.dict.pairs[i].key ? fonts->u.dict.pairs[i].key : "?");
-        fprintf(stderr, " -> %s\n",
-                !fdict ? "MISS" : (fdict->type == PDF_DICT ? "dict" : "notdict"));
-    }
     if (!fdict || fdict->type != PDF_DICT) {
         /*
          * Some writers put a subtype dictionary directly on the page and
@@ -1102,19 +1079,18 @@ static void advance_tm(FILE *out, double *tm, double adv) {
 static void show_type3(psfont_t *f, FILE *out, const unsigned char *s, size_t n,
                        double *tm) {
     size_t k;
-    if (getenv("PDFTOPS_DEBUG")) {
-        size_t hits = 0, q;
-        for (q = 0; q < n; q++) if (f->t3[(unsigned char)s[q]].ps) hits++;
-        fprintf(stderr, "[t3] show n=%lu glyphs_with_ps=%lu first_byte=%d\n",
-                (unsigned long)n, (unsigned long)hits,
-                n ? (int)s[0] : -1);
-    }
     for (k = 0; k < n; k++) {
         int code = s[k];
-        t3g_t *gl = &f->t3[code];
-        double adv = f->have_widths ? f->widths[code] * f->t3matrix[0]
-                                    : f->widths[code] * f->t3matrix[0];
-        if (adv == 0 && f->have_widths) adv = 0;
+        t3g_t *gl;
+        double adv;
+        if (code < 0 || code >= PSF_MAX_GLYPH) { advance_tm(out, tm, 0.5); continue; }
+        gl = &f->t3[code];
+        /* /Widths is in glyph units; FontMatrix[0] scales it into text space.
+         * Fall back to half an em so a glyph with no declared width still
+         * leaves a gap instead of stacking every character on one spot. */
+        adv = (f->have_widths && f->widths[code] > 0)
+                  ? f->widths[code] * f->t3matrix[0]
+                  : 0.5;
         if (gl->ps) {
             /* glyph space -> text space via FontMatrix, text -> user via Tm */
             double a = tm[0] * f->t3matrix[0] + tm[2] * f->t3matrix[1];
