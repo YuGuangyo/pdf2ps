@@ -988,7 +988,7 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
          * reference fonts through a nested /Font dict; try one more level
          * before giving up.
          */
-        return;
+        return NULL;
     }
 
     sub = pdf_resolve(doc, pdf_dict_get(fdict, "Subtype"));
@@ -1008,7 +1008,7 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
     }
 
     cache_add(f);
-    return;
+    return f;
 }
 /* ------------------------------------------------------------------ */
 /* Emission                                                            */
