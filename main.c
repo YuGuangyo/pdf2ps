@@ -130,19 +130,9 @@ int main(int argc, char **argv) {
 
     {
         pdf_value *root = NULL;
-        if (debug) {
-            int k, live = 0;
-            for (k = 1; k < doc->xref_size; k++)
-                if (doc->xref[k].offset > 0 || doc->xref[k].in_object_stream > 0) live++;
-                    doc->len, doc->xref_size, live, doc->trailer ? "present" : "NULL");
-            if (doc->trailer && doc->trailer->type == PDF_DICT)
-        }
         if (doc->trailer) {
             pdf_value *r = pdf_dict_get(doc->trailer, "Root");
-            if (debug)
             root = pdf_resolve(doc, r);
-            if (debug)
-                        root ? (root->type == PDF_DICT ? "dict" : "other") : "NULL");
         }
         if (!root) {
             /*
@@ -154,7 +144,6 @@ int main(int argc, char **argv) {
                 pdf_value *v, *type;
                 if (doc->xref[i].offset <= 0 && doc->xref[i].in_object_stream == 0) continue;
                 v = pdf_get(doc, i);
-                if (debug && v)
                 if (!v || v->type != PDF_DICT) continue;
                 type = pdf_dict_get(v, "Type");
                 if (type && pdf_name(type) && !strcmp(pdf_name(type), "Catalog")) root = v;
