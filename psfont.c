@@ -1017,6 +1017,14 @@ psfont_t *psfont_resolve(pdf_doc *doc, pdf_value *resources, const char *resname
     if (!fonts || fonts->type != PDF_DICT) return NULL;
 
     fdict = pdf_resolve(doc, pdf_dict_get(fonts, resname));
+    if (getenv("PDFTOPS_DEBUG")) {
+        int i;
+        fprintf(stderr, "[t3] resolve '%s': fonts has %d keys:", resname, fonts->u.dict.count);
+        for (i = 0; i < fonts->u.dict.count && i < 8; i++)
+            fprintf(stderr, " [%s]", fonts->u.dict.pairs[i].key ? fonts->u.dict.pairs[i].key : "?");
+        fprintf(stderr, " -> %s\n",
+                !fdict ? "MISS" : (fdict->type == PDF_DICT ? "dict" : "notdict"));
+    }
     if (!fdict || fdict->type != PDF_DICT) {
         /*
          * Some writers put a subtype dictionary directly on the page and
