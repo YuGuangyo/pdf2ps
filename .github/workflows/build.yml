@@ -90,7 +90,14 @@ jobs:
           # psgen.c 包含 <math.h>，静态链接时把 -lm 带上更保险
           # 三元组 mipsel-... 已隐含小端，无需 -EL
           # -g 保留调试符号：崩溃时能对上 epc 地址
+          # MIPS ABI 必须显式钉死，否则编出来的 e_flags 是 0x1007
+          # (MIPS-I, 无 FP32)，在 1004Kc 上会缺少 FP32 标记、且指令集级别过低。
+          # 目标机 /usr/sbin/cupsd 的 e_flags = 0x00200034：
+          #   EF_MIPS_ABI_O32 (0x1000) | EF_MIPS_ARCH_32R2 (0x20)
+          #   | EF_MIPS_FP32 (0x200000)  ->  软浮点 + MIPS32r2
           "$CC" -O2 -g -Wall -Wextra -static \
+              -EL -march=mips32r2 -mabi=32 -msoft-float -mfp32 \
+              -mno-abicalls -G0 \
               -o pdftops-lite \
               buf.c pdfobj.c psfont.c psgen.c pdfimage.c main.c -lm
           file pdftops-lite || true
@@ -99,6 +106,13 @@ jobs:
           # （O32 ABI + FP32 软浮点 + MIPS32R2）
           echo -n "e_flags bytes: "
           od -An -tx1 -j36 -N4 pdftops-lite
+          flags=$(od -An -tx4 -j36 -N4 pdftops-lite | tr -d ' \n')
+          if [ "$flags" = "00200034" ]; then
+            echo "OK   e_flags: 0x$flags (O32 + FP32 soft-float + MIPS32r2)"
+          else
+            echo "::error::e_flags is 0x$flags, expected 0x00200034 (O32|FP32|MIPS32r2)"
+            exit 1
+          fi
 
       # ------------------------------------------------------------------
       # 生成测试 PDF 集合
