@@ -779,6 +779,13 @@ static void setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
     matrix = pdf_resolve(doc, pdf_dict_get(fdict, "FontMatrix"));
 
     f->kind = PSF_TYPE3;
+    if (getenv("PDFTOPS_DEBUG")) {
+        fprintf(stderr, "[t3] enter procs=%s widths=%s matrix=%s first=%d\n",
+                procs ? (procs->type == PDF_DICT ? "dict" : "other") : "NULL",
+                widths ? (widths->type == PDF_ARRAY ? "arr" : "other") : "NULL",
+                matrix ? "ok" : "NULL",
+                (int)num_or(fdict, "FirstChar", 0));
+    }
     f->t3matrix[0] = 0.001; f->t3matrix[1] = 0;
     f->t3matrix[2] = 0;     f->t3matrix[3] = 0.001;
     f->t3matrix[4] = 0;     f->t3matrix[5] = 0;
@@ -824,9 +831,17 @@ static void setup_type3(psfont_t *f, pdf_doc *doc, pdf_value *fdict) {
                     if (!gname) continue;
                     if (cur < 0 || cur >= PSF_MAX_GLYPH) { cur++; continue; }
                     proc = pdf_resolve(doc, pdf_dict_get(procs, gname));
+                    if (getenv("PDFTOPS_DEBUG")) {
+                        fprintf(stderr, "[t3] diff cur=%d name='%s' proc=%s\n", cur, gname,
+                                !proc ? "NULL" : (proc->type == PDF_STREAM ? "stream" : "other"));
+                    }
                     if (proc && proc->type == PDF_STREAM) {
                         double wx = 0;
                         char *body = t3_translate(doc, proc, &wx);
+                        if (getenv("PDFTOPS_DEBUG")) {
+                            fprintf(stderr, "[t3]   translated: %s wx=%.2f\n",
+                                    body ? "ok" : "NULL", wx);
+                        }
                         if (!f->t3[cur].used) f->t3[cur].used = 1;
                         if (body) {
                             if (f->t3[cur].ps) free(f->t3[cur].ps);

@@ -280,9 +280,9 @@ jobs:
           if [ "${count:-0}" -lt 4 ]; then
             echo "::error::type3: expected >=4 glyph fills for AAAA, got ${count:-0}"; bad=1
           else echo "OK   type3: $count glyph fills (AAAA)"; fi
-          if [ "$(grep -c '%%Page:' out/cs.pdf.ps)" != "2" ]; then
-            echo "::error::cs: expected 2 pages, got $(grep -c '%%Page:' out/cs.pdf.ps)"; bad=1
-          else echo "OK   cs: 2 pages"; fi
+          pages=$(grep -c '^showpage' out/cs.pdf.ps || true)
+          if [ "${pages:-0}" = "2" ]; then echo "OK   cs: 2 pages"
+          else echo "::error::cs: expected 2 showpage, got ${pages:-0}"; bad=1; fi
           echo "--- cs.pdf.ps ---"; cat out/cs.pdf.ps
           echo "--- type3.pdf.ps ---"; cat out/type3.pdf.ps
           exit $bad
