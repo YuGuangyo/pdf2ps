@@ -207,6 +207,12 @@ int main(int argc, char **argv) {
         }
         psgen_page_begin(&g, x0, y0, x1, y1);
         g.resources = res;
+        if (getenv("PDFTOPS_DEBUG")) {
+            pdf_value *fl = res ? pdf_resolve(doc, pdf_dict_get(res, "Font")) : NULL;
+            fprintf(stderr, "[dbg] page=%d res=%s fontdict=%s\n", i,
+                    res ? "ok" : "NULL",
+                    (fl && fl->type == PDF_DICT) ? "ok" : "NULL");
+        }
         contents = pdf_dict_get(page, "Contents");
         if (contents) psgen_page_content(doc, &g, contents);
         g.resources = NULL;

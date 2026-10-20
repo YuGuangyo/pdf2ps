@@ -128,14 +128,19 @@ void psgen_page_begin(psgen_t *g, double x0, double y0, double x1, double y1) {
     g->media_x1 = x1;
     g->media_y1 = y1;
     psfont_cache_reset();
-    /* PDF origin is bottom-left, same as PS: just translate mediabox origin */
+    /* PDF origin is bottom-left, same as PS: just translate mediabox origin.
+     * The page must be wrapped in exactly one gsave/grestore pair, and the
+     * clip needs a path built first -- `rectclip` with an empty path cancels
+     * the whole page on the M401. */
+    ps_out(g, "gsave\n");
     ps_printf(g, "%.4f %.4f translate\n", x0, y0);
-    ps_printf(g, "%.4f %.4f %.4f %.4f rectclip\n", 0.0, 0.0, x1 - x0, y1 - y0);
+    ps_printf(g, "0 0 moveto %.4f 0 lineto %.4f %.4f lineto 0 %.4f lineto closepath clip newpath\n",
+              x1 - x0, x1 - x0, y1 - y0, y1 - y0);
 }
 
 void psgen_page_end(psgen_t *g) {
-    ps_out(g, "grestore\n");
     ps_out(g, "showpage\n");
+    ps_out(g, "grestore\n");
 }
 
 /* ---------------------------------------------------------------- */
@@ -214,6 +219,7 @@ static int stream_decode(pdf_doc *doc, pdf_value *stream, buf_t *out) {
  */
 static void show_operands(psgen_t *g, psfont_t *cur, opstack_t *st, double *tm) {
     int i;
+    if (st->n <= 0) return;
     for (i = 0; i < st->n; i++) {
         operand_t *o = &st->ops[i];
         if (o->kind == 1) {
@@ -243,6 +249,7 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
     char font_name[128];
     char last_name[128];
     psfont_t *cur_font = NULL;
+    int text_depth = 0;   /* nested BT/ET tracking, keeps gsave balanced */
     /* Text state tracked in C so Type3 glyph paths can be placed exactly.
      * tm is the text matrix (PDF 3x3 with the last row 0 0 1, stored as the
      * six meaningful numbers), tlm the text line matrix. */
@@ -406,6 +413,10 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
                 g->cur_size = sz;
                 cur_font = psfont_resolve(doc, g->resources, resname);
                 psfont_set(cur_font, g->out, sz);
+                /* The resource name and the size were both consumed by Tf;
+                 * leaving them on the stack would corrupt the next operator's
+                 * operands (Tm in particular expects exactly six numbers). */
+                ops_reset(&st);
             } else if (!strcmp(op, "Td")) {
                 if (st.n >= 2) {
                     double tx = num_at(&st, st.n - 2), ty = num_at(&st, st.n - 1);
@@ -437,12 +448,23 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
                 }
                 ops_reset(&st);
             } else if (!strcmp(op, "BT")) {
+                /* BT/ET are mirrors: the gsave here is undone by the grestore
+                 * in ET. PostScript has no gsave inside text objects, but the
+                 * save/restore pair is harmless because no `show` straddles a
+                 * gsave. Falling back to a plain reset keeps the depth even if
+                 * the stream is malformed and ET never arrives. */
                 ps_out(g, "gsave\n");
+                text_depth++;
+                cur_font = NULL;   /* force a re-issue on the next Tf */
+                g->cur_size = 0.0;
                 tm[0] = 1; tm[1] = 0; tm[2] = 0; tm[3] = 1; tm[4] = 0; tm[5] = 0;
                 memcpy(tlm, tm, sizeof tm);
                 ops_reset(&st);
             } else if (!strcmp(op, "ET")) {
-                ps_out(g, "grestore\n");
+                if (text_depth > 0) {
+                    ps_out(g, "grestore\n");
+                    text_depth--;
+                }
                 ops_reset(&st);
             } else if (!strcmp(op, "cm")) {
                 if (st.n >= 6) {
@@ -489,9 +511,20 @@ static void run_content(pdf_doc *doc, pdf_value *stream, psgen_t *g, int depth) 
                 ps_out(g, "closepath\n");
                 ops_reset(&st);
             } else if (!strcmp(op, "re")) {
-                if (st.n >= 4) ps_printf(g, "%.4f %.4f %.4f %.4f rect\n",
-                                         num_at(&st, st.n - 4), num_at(&st, st.n - 3),
-                                         num_at(&st, st.n - 2), num_at(&st, st.n - 1));
+                /* PostScript has no `x y w h rect`; path construction needs an
+                 * explicit moveto/lineto/closepath, otherwise the four numbers
+                 * pile up on the operand stack and the page dies. */
+                if (st.n >= 4) {
+                    double rx = num_at(&st, st.n - 4), ry = num_at(&st, st.n - 3);
+                    double rw = num_at(&st, st.n - 2), rh = num_at(&st, st.n - 1);
+                    ps_printf(g,
+                              "newpath %.4f %.4f moveto %.4f %.4f lineto "
+                              "%.4f %.4f lineto %.4f %.4f lineto closepath\n",
+                              rx, ry,
+                              rx + rw, ry,
+                              rx + rw, ry + rh,
+                              rx, ry + rh);
+                }
                 ops_reset(&st);
             } else if (!strcmp(op, "S")) {
                 ps_out(g, "stroke\n");
