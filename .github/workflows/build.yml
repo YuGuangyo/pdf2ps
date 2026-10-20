@@ -174,10 +174,10 @@ jobs:
               b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
               b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
               b"/Contents [5 0 R 6 0 R] "
-              b"/Resources << /Font << /F1 9 0 R >> >> >>",
+              b"/Resources << /Font << /F1 8 0 R >> >> >>",
               b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
               b"/Contents 7 0 R "
-              b"/Resources << /Font << /F1 9 0 R >> >> >>",
+              b"/Resources << /Font << /F1 8 0 R >> >> >>",
               b"<< /Length %d >>\nstream\n" % len(c1) + c1 + b"endstream",
               b"<< /Length %d >>\nstream\n" % len(b"\n") + b"\nendstream",
               b"<< /Length %d >>\nstream\n" % len(c2) + c2 + b"endstream",

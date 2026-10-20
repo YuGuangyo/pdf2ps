@@ -733,11 +733,24 @@ static char *t3_translate(pdf_doc *doc, pdf_value *charproc, double *out_wx) {
                 emitted = 1;
             } else if (!strcmp(tok, "h")) {
                 buf_puts(&ps, "closepath\n");
+            } else if (!strcmp(tok, "re") && n >= 4) {
+                /* Rectangle: x y w h re == moveto + 3 lineto + closepath.
+                 * Skia emits glyphs as bare rectangles, so without this the
+                 * whole glyph translates to nothing and the page stays blank. */
+                double x = st[n-4], y = st[n-3], w = st[n-2], hh = st[n-1];
+                char tmp[256];
+                snprintf(tmp, sizeof(tmp),
+                         "%.4f %.4f moveto\n%.4f %.4f lineto\n"
+                         "%.4f %.4f lineto\n%.4f %.4f lineto\nclosepath\n",
+                         x, y, x + w, y, x + w, y + hh, x, y + hh);
+                buf_puts(&ps, tmp);
+                emitted = 1;
             } else if (!strcmp(tok, "d0") && n >= 2) {
                 if (out_wx) *out_wx = st[n-2];
                 has_width = 1;
             } else if (!strcmp(tok, "d1") && n >= 6) {
-                if (out_wx) *out_wx = st[n-3];
+                /* d1 wx wy llx lly urx ury -- wx is the leftmost operand. */
+                if (out_wx) *out_wx = st[n-6];
                 has_width = 1;
             }
             /* fill / stroke intent is applied uniformly as eofill by the
