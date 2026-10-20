@@ -297,8 +297,8 @@ jobs:
           for f in testdata/*.pdf; do
             name=$(basename "$f")
             echo "--- qemu $name ---"
-            # -cpu mips32r2: 路由器是 MIPS 1004Kc（MIPS32r2 核），指令集不匹配会在这里暴露
-            PDFTOPS_DEBUG=1 qemu-mipsel-static -cpu mips32r2 ./pdftops-lite "$f" > "out/qemu-$name.ps" \
+            # -cpu 34Kf: MIPS32r2 核（与路由器的 1004Kc 同代），指令集不匹配会在这里暴露
+            PDFTOPS_DEBUG=1 qemu-mipsel-static -cpu 34Kf ./pdftops-lite "$f" > "out/qemu-$name.ps" \
               || { echo "::error::qemu run failed for $name"; exit 1; }
             echo "qemu OK $(wc -c < "out/qemu-$name.ps") bytes"
           done
