@@ -235,20 +235,27 @@ jobs:
           echo "all samples converted without ASan/UBSan errors"
 
       # 逐样本做语义断言（不只是「没崩」，还要「内容对」）
+      # 注意：`cmd && echo` 这种写法在 set -e 下失败也不会中断，会产生假阳性，
+      # 所以这里用显式 if 计数，最后统一判定。
       - name: Assert output content
         run: |
-          set -euo pipefail
-          grep -q 'Hello M401'    out/tiny.pdf.ps     && echo "OK tiny:    text survived"
-          head -1 out/tiny.pdf.ps | grep -q '%!PS'    && echo "OK tiny:    PS header"
-          grep -q 'page one'      out/cs.pdf.ps       && echo "OK cs:      page one"
-          grep -q 'page two'      out/cs.pdf.ps       && echo "OK cs:      page two"
-          grep -c '%%Page:'       out/cs.pdf.ps | grep -qx '2' && echo "OK cs:      2 pages"
-          grep -q 'AAAA'          out/type3.pdf.ps    && echo "OK type3:   text emitted"
-          if [ -f out/broken.pdf.ps ]; then
-            grep -q 'NoTrailer'   out/broken.pdf.ps   && echo "OK broken:  fallback path"
-          fi
-          echo "--- type3.pdf.ps (first 30 lines) ---"
-          head -30 out/type3.pdf.ps
+          set -uo pipefail
+          bad=0
+          need() {  # need <file> <pattern> <label>
+            if grep -q -- "$2" "$1"; then echo "OK   $3"
+            else echo "::error::MISSING $3 ($2 not found in $1)"; bad=1; fi
+          }
+          need out/tiny.pdf.ps  'Hello M401'  'tiny: text survived'
+          need out/tiny.pdf.ps  '^%!PS'       'tiny: PS header'
+          need out/cs.pdf.ps    'page one'    'cs: page one'
+          need out/cs.pdf.ps    'page two'    'cs: page two'
+          need out/type3.pdf.ps 'AAAA'        'type3: text emitted'
+          if [ "$(grep -c '%%Page:' out/cs.pdf.ps)" != "2" ]; then
+            echo "::error::cs: expected 2 pages, got $(grep -c '%%Page:' out/cs.pdf.ps)"; bad=1
+          else echo "OK   cs: 2 pages"; fi
+          echo "--- cs.pdf.ps ---"; cat out/cs.pdf.ps
+          echo "--- type3.pdf.ps ---"; cat out/type3.pdf.ps
+          exit $bad
 
       # mipsel 静态二进制在 qemu 下再跑一遍，确认交叉编译产物行为一致
       - name: Run mipsel binary under qemu
